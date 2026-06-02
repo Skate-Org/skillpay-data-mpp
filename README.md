@@ -68,7 +68,48 @@ many vouchers — the mppx *multi-fetch* pattern), prints live alpha, and on
    `Authorization: Bearer <token>`), then `{"t":"subscribe","symbols":["CL"]}`.
 3. **Extend** on `{"t":"payment-need-voucher"}`: pay another voucher (same
    channel) and send `{"t":"authorization","token":"<new token>"}`.
-4. **Close**: `session.close()` → on-chain settle + refund.
+4. **Close**: see below.
+
+---
+
+## Closing a channel (payer-side)
+
+A channel locks `maxDeposit` in the escrow on open. To get the unused remainder
+back you close the channel. Two paths:
+
+**A. Cooperative close (immediate)** — submit the latest voucher to the escrow's
+`close(channelId, cumulativeAmount, signature)`. This settles the spent amount to
+the payee and refunds the rest in one tx. Requires a counterparty-accepted voucher
+(the server must support a settle/close handshake).
+
+**B. Payer-side unilateral close (no server, no recipient gas needed)** — the
+payer reclaims directly via the escrow. Use this when the server can't co-sign or
+the recipient has no gas to settle. Two txs, both paid by the payer:
+
+```js
+import { createWalletClient, createPublicClient, http } from 'viem';
+import { privateKeyToAccount } from 'viem/accounts';
+import { Chain } from 'viem/tempo';
+import { escrowAbi } from 'mppx/dist/tempo/session/Chain.js';
+
+const ESCROW = '0x33b901018174DDabE4841042ab76ba85D4e24f25'; // Tempo mainnet escrow
+const account = privateKeyToAccount(process.env.PRIVATE_KEY);
+const wallet = createWalletClient({ account, chain: Chain.mainnet, transport: http() });
+const pub = createPublicClient({ chain: Chain.mainnet, transport: http() });
+
+// 1. start the close (begins the CLOSE_GRACE_PERIOD, 900s on mainnet)
+await wallet.writeContract({ address: ESCROW, abi: escrowAbi, functionName: 'requestClose', args: [channelId] });
+
+// 2. after the grace period, reclaim the deposit
+await wallet.writeContract({ address: ESCROW, abi: escrowAbi, functionName: 'withdraw', args: [channelId] });
+```
+
+- `channelId` is in the open tx's `ChannelOpened` log (topic 1); `getChannel(channelId)`
+  returns `{payer, payee, token, deposit, settled, finalized, closeRequestedAt}`.
+- `CLOSE_GRACE_PERIOD()` (≈15 min on mainnet) lets the payee submit vouchers to
+  claim their share before the payer withdraws the remainder.
+- Tempo pays gas in the stablecoin, so the payer needs a little pathUSD for the
+  two txs (no native token required).
 
 ---
 
