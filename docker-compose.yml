@@ -32,17 +32,15 @@ services:
       SIDECAR_HOST: sidecar
       SIDECAR_PORT: "5051"
       SIDECAR_EMIT_MS: ${SIDECAR_EMIT_MS:-1000}
-      STREAM_CHAIN_LABEL: ${STREAM_CHAIN_LABEL:-Tempo Testnet}
-      # ── MPP payment rail (see README + .env.example) ──
-      STREAM_CHAIN_ID: ${STREAM_CHAIN_ID:-143}
-      STREAM_CURRENCY: ${STREAM_CURRENCY:-0x754704bc059f8c67012fed69bc8a327a5aafb603}
-      STREAM_RECIPIENT: ${STREAM_RECIPIENT:-0x0000000000000000000000000000000000000000}
-      STUB_SETTLEMENT: ${STUB_SETTLEMENT:-true}
-      # Real Tempo MPP payment-channel session route (/mpp/session). Recipient
-      # signing key (also pays settle/close gas in stablecoin) + HMAC secret.
-      MPP_RECIPIENT_KEY: ${MPP_RECIPIENT_KEY:-}
+      # ── Tempo MPP payment rail (the only rail). One toggle: mainnet/testnet. ──
+      MPP_TESTNET: ${MPP_TESTNET:-false}            # false = Tempo mainnet (default)
+      # pathUSD on Tempo (same well-known address on both nets); overrides the
+      # SDK mainnet default (USDC) so subscribers pay in pathUSD.
+      MPP_CURRENCY: ${MPP_CURRENCY:-0x20c0000000000000000000000000000000000000}
+      MPP_RECIPIENT_KEY: ${MPP_RECIPIENT_KEY:-}    # recipient signing key (pays settle/close gas)
       MPP_SECRET_KEY: ${MPP_SECRET_KEY:-crude-alpha-stream-prod-secret}
-      MPP_AMOUNT: ${MPP_AMOUNT:-0.05}
+      MPP_AMOUNT: ${MPP_AMOUNT:-0.001}             # pathUSD per voucher = $0.001/min
+      MPP_MINUTES_PER_PAYMENT: ${MPP_MINUTES_PER_PAYMENT:-1}
     # Public ingress: clients subscribe to the MPP stream here.
     ports:
       - "${STREAM_PORT:-7070}:7070"

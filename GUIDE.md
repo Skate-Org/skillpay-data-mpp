@@ -56,7 +56,9 @@ closes + settles on-chain (refunding the unused deposit).
 ## Funding (mainnet)
 
 Tempo mainnet has **no faucet** — fund the payer wallet with real **pathUSD**
-(`0x20C000000000000000000000b9537d11c60E8b50`, 6 decimals) before subscribing.
+(`0x20c0000000000000000000000000000000000000`, 6 decimals) before subscribing.
+(pathUSD is the canonical TIP-20 stablecoin; the server charges in it. The mppx
+SDK *default* mainnet currency is USDC `0x20C0…E8b50` — set `MPP_CURRENCY` to switch.)
 `MAX_DEPOSIT` is locked into the channel on open and the unused remainder is
 refunded on close.
 
@@ -108,7 +110,7 @@ MPP_RECIPIENT_KEY=0x...   # recipient signing key (pays settle/close gas in stab
 |---|---|---|
 | chain id | 4217 | 42431 |
 | RPC | https://rpc.tempo.xyz | https://rpc.moderato.tempo.xyz |
-| pathUSD | 0x20C0…E8b50 | 0x20c0…0000 |
+| currency (pathUSD) | 0x20c0…0000 | 0x20c0…0000 |
 | explorer | https://explore.tempo.xyz | https://explore.testnet.tempo.xyz |
 | faucet | none (real funds) | open (`tempo_fundAddress`) |
 

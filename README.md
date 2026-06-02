@@ -85,7 +85,7 @@ MPP_TESTNET=true    # Tempo testnet (Moderato)
 |---|---|---|
 | chain id | 4217 | 42431 |
 | RPC | https://rpc.tempo.xyz | https://rpc.moderato.tempo.xyz |
-| pathUSD | `0x20C0…E8b50` | `0x20c0…0000` |
+| currency (pathUSD) | `0x20c0…0000` | `0x20c0…0000` |
 | explorer | https://explore.tempo.xyz | https://explore.testnet.tempo.xyz |
 | faucet | none (real funds) | open (`tempo_fundAddress`) |
 

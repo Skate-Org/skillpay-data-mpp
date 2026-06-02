@@ -20,11 +20,11 @@ const MINUTES_PER_PAYMENT = Number(process.env.MPP_MINUTES_PER_PAYMENT ?? 1);
 const IS_TESTNET = process.env.MPP_TESTNET === 'true';
 const RPC = process.env.MPP_RPC ?? (IS_TESTNET ? 'https://rpc.moderato.tempo.xyz' : 'https://rpc.tempo.xyz');
 const CHAIN_ID = Number(process.env.MPP_CHAIN_ID ?? (IS_TESTNET ? 42431 : 4217));
-// pathUSD differs per chain: testnet 0x20c0…0000, mainnet 0x20C0…E8b50 (mppx defaults).
+// pathUSD is the canonical TIP-20 stablecoin — same well-known address on both
+// Tempo nets. (The mppx SDK *default* mainnet currency is USDC 0x20C0…E8b50, but
+// we charge in pathUSD; override with MPP_CURRENCY if you want USDC.)
 const PATHUSD = (process.env.MPP_CURRENCY ??
-  (IS_TESTNET
-    ? '0x20c0000000000000000000000000000000000000'
-    : '0x20C000000000000000000000b9537d11c60E8b50')) as `0x${string}`;
+  '0x20c0000000000000000000000000000000000000') as `0x${string}`;
 const AMOUNT = process.env.MPP_AMOUNT ?? '0.001'; // per paid request/unit (channel deposit covers it)
 
 const tempoChain = defineChain({

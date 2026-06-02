@@ -21,9 +21,7 @@ import { sessionManager } from '../../node_modules/mppx/dist/tempo/client/index.
 const IS_TESTNET = (globalThis as any).MPP_TESTNET === true;
 const RPC = IS_TESTNET ? 'https://rpc.moderato.tempo.xyz' : 'https://rpc.tempo.xyz';
 const EXPLORER = IS_TESTNET ? 'https://explore.testnet.tempo.xyz' : 'https://explore.tempo.xyz';
-const PATHUSD = IS_TESTNET
-  ? '0x20c0000000000000000000000000000000000000'
-  : '0x20C000000000000000000000b9537d11c60E8b50';
+const PATHUSD = '0x20c0000000000000000000000000000000000000'; // pathUSD (both nets)
 const tempoChain = defineChain({
   id: IS_TESTNET ? 42431 : 4217,
   name: IS_TESTNET ? 'Tempo Testnet' : 'Tempo',
