@@ -1,0 +1,763 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>OIL ALPHA · MPP STREAM</title>
+<style>
+  :root{
+    --bg:#04060a; --bg2:#080b11; --panel:#0a0e15; --panel2:#0d121b;
+    --line:#16202e; --line2:#1f2c3d;
+    --txt:#c6d3e0; --dim:#5d6e80; --dimmer:#3a4658;
+    --grn:#00e58c; --grn2:#0a2a20; --red:#ff4d63; --red2:#2a0f15;
+    --cyan:#3fc7ff; --amber:#ffb547; --violet:#a78bfa;
+    --skate:#c4f53a; --skate2:#9fd400; /* Skate lime brand accent */
+    --glow:0 0 12px;
+    --mono:'JetBrains Mono','SFMono-Regular',ui-monospace,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:
+      radial-gradient(1200px 600px at 80% -10%, #0a1626 0%, transparent 60%),
+      radial-gradient(900px 500px at 0% 110%, #0c1020 0%, transparent 55%),
+      var(--bg);
+    color:var(--txt); font-family:var(--mono); font-size:13px; line-height:1.4;
+    -webkit-font-smoothing:antialiased; overflow:hidden;
+  }
+  .app{display:grid;grid-template-rows:auto 1fr auto;height:100vh;gap:1px}
+
+  /* ── top bar ── */
+  header{
+    display:flex;align-items:center;gap:18px;padding:9px 16px;
+    background:linear-gradient(180deg,#0a0f17,#070a10);
+    border-bottom:1px solid var(--line2);
+  }
+  .brand{display:flex;align-items:center;gap:11px;font-weight:700;letter-spacing:.14em}
+  .brand .logo{height:30px;width:auto;display:block;object-fit:contain;filter:drop-shadow(0 0 7px #c4f53a66)}
+  .brand small{color:var(--dim);font-weight:400;letter-spacing:.18em;font-size:10px}
+  .tempo{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:5px;font-size:10px;letter-spacing:.12em;color:var(--skate);border:1px solid #3a4a12;background:linear-gradient(180deg,#141b06,#0c1004);box-shadow:inset 0 0 14px #c4f53a18}
+  .tempo .dot{width:6px;height:6px;border-radius:50%;background:var(--skate);box-shadow:0 0 8px var(--skate)}
+  .spacer{flex:1}
+  .stat{display:flex;flex-direction:column;align-items:flex-end;line-height:1.15}
+  .stat .v{font-weight:700} .stat .l{color:var(--dim);font-size:9px;letter-spacing:.14em}
+  .statrow{display:flex;gap:20px;align-items:center}
+  .pulse{width:9px;height:9px;border-radius:50%;background:var(--dimmer);transition:background .1s}
+  .pulse.on{background:var(--cyan);box-shadow:var(--glow) var(--cyan)}
+  .conn{padding:3px 10px;border-radius:4px;border:1px solid var(--line2);font-size:10px;letter-spacing:.14em;color:var(--dim)}
+  .conn.live{color:var(--grn);border-color:#0c5; box-shadow:inset 0 0 12px #00e58c22}
+  .conn.paying{color:var(--amber);border-color:#a70}
+  .conn.paused{color:var(--violet);border-color:#74c}
+  .conn.expired,.conn.err{color:var(--red);border-color:#a23}
+
+  /* ── body ── */
+  .body{display:grid;grid-template-columns:300px 1fr;gap:1px;min-height:0;background:var(--line)}
+  .col{background:var(--bg2);min-height:0;overflow:auto}
+  .col.left{padding:14px;display:flex;flex-direction:column;gap:14px}
+  .col.main{display:grid;grid-template-rows:auto 1fr;gap:1px;background:var(--line)}
+
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:12px}
+  .card h3{margin:0 0 10px;font-size:10px;letter-spacing:.2em;color:var(--dim);font-weight:600;display:flex;justify-content:space-between;align-items:center}
+  .card h3 .tag{color:var(--dimmer)}
+
+  label.fld{display:block;font-size:10px;letter-spacing:.12em;color:var(--dim);margin:0 0 4px}
+  select,input{
+    width:100%;background:#070b12;border:1px solid var(--line2);color:var(--txt);
+    font-family:var(--mono);font-size:13px;padding:8px 9px;border-radius:5px;outline:none;
+  }
+  select:focus,input:focus{border-color:var(--cyan);box-shadow:0 0 0 2px #3fc7ff22}
+  .row2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+
+  .btns{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:2px}
+  button{
+    font-family:var(--mono);font-weight:700;letter-spacing:.1em;font-size:12px;
+    padding:11px 10px;border-radius:6px;cursor:pointer;border:1px solid transparent;transition:.12s;
+  }
+  button:disabled{opacity:.35;cursor:not-allowed}
+  .btn-sub{background:linear-gradient(180deg,var(--skate),var(--skate2));color:#0a1400;box-shadow:0 0 18px #c4f53a55}
+  .btn-sub:hover:not(:disabled){box-shadow:0 0 28px #c4f53a99}
+  .btn-unsub{background:#10151e;color:var(--red);border-color:#3a1a22}
+  .btn-unsub:hover:not(:disabled){background:#1a0f14}
+  .btn-wide{grid-column:1/-1}
+  .btn-ghost{background:#0c1118;color:var(--dim);border-color:var(--line2)}
+
+  /* MPP panel */
+  .kv{display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px dashed #131c28}
+  .kv:last-child{border-bottom:0}
+  .kv .k{color:var(--dim);font-size:10px;letter-spacing:.1em}
+  .kv .v{font-weight:700;font-variant-numeric:tabular-nums}
+  .v.mono{font-size:11px;color:var(--cyan)}
+  .v.good{color:var(--grn)} .v.warn{color:var(--amber)} .v.bad{color:var(--red)}
+  .bar{height:6px;background:#0c121b;border-radius:4px;overflow:hidden;margin-top:6px;border:1px solid var(--line)}
+  .bar > i{display:block;height:100%;background:linear-gradient(90deg,#00e58c,#3fc7ff);transition:width .25s linear}
+  .bar.low > i{background:linear-gradient(90deg,#ffb547,#ff4d63)}
+
+  /* hero strip */
+  .heroes{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line)}
+  .hero{background:var(--panel2);padding:12px 14px;display:flex;flex-direction:column;gap:3px;position:relative;overflow:hidden}
+  .hero .hl{font-size:9px;letter-spacing:.2em;color:var(--dim)}
+  .hero .hv{font-size:26px;font-weight:800;font-variant-numeric:tabular-nums;letter-spacing:-.01em}
+  .hero .hsub{font-size:10px;color:var(--dimmer)}
+  .hero canvas{position:absolute;inset:auto 0 0 0;height:34px;width:100%;opacity:.55}
+
+  /* charts + tiles */
+  .panes{display:grid;grid-template-columns:1.35fr 1fr;gap:1px;background:var(--line);min-height:0}
+  .charts{background:var(--bg2);display:grid;grid-template-rows:repeat(4,1fr);gap:1px;min-height:0}
+  .chart{background:var(--panel);position:relative;min-height:0}
+  .chart .ctitle{position:absolute;top:7px;left:11px;font-size:9px;letter-spacing:.18em;color:var(--dim);z-index:2}
+  .chart .cval{position:absolute;top:6px;right:11px;font-size:13px;font-weight:800;z-index:2;font-variant-numeric:tabular-nums}
+  .chart canvas{position:absolute;inset:0;width:100%;height:100%}
+
+  .tiles{background:var(--bg2);overflow:auto;padding:10px;display:grid;grid-template-columns:1fr 1fr;gap:7px;align-content:start}
+  .tile{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:8px 9px;position:relative;transition:background .12s,border-color .12s}
+  .tile .tl{font-size:9px;letter-spacing:.1em;color:var(--dim);display:flex;justify-content:space-between}
+  .tile .tl .grp{color:var(--dimmer);font-size:8px}
+  .tile .tv{font-size:17px;font-weight:800;font-variant-numeric:tabular-nums;margin-top:3px;display:flex;align-items:baseline;gap:6px}
+  .tile .tv .arrow{font-size:11px}
+  .tile .age{position:absolute;right:8px;bottom:6px;font-size:8px;color:var(--dimmer)}
+  .tile.null{opacity:.4}
+  .tile.null .tv{color:var(--dimmer)}
+  .tile.flash-up{border-color:#0c7;background:#08160f}
+  .tile.flash-dn{border-color:#a34;background:#16080c}
+  .up{color:var(--grn)} .dn{color:var(--red)}
+
+  /* tape */
+  footer{background:var(--panel);border-top:1px solid var(--line2);height:150px;display:grid;grid-template-rows:auto 1fr}
+  .tape-h{display:flex;align-items:center;gap:14px;padding:6px 14px;border-bottom:1px solid var(--line);font-size:9px;letter-spacing:.18em;color:var(--dim)}
+  .tape{overflow:auto;padding:2px 14px 8px;font-size:11px}
+  .tape .t{display:grid;grid-template-columns:64px 60px 78px 1fr;gap:10px;padding:2px 0;border-bottom:1px solid #0c121a;white-space:nowrap;animation:fadein .25s}
+  @keyframes fadein{from{background:#0d1b14;opacity:.4}to{background:transparent;opacity:1}}
+  .tape .t .seq{color:var(--dimmer)} .tape .t .hs{font-weight:700}
+  .hs.ok{color:var(--grn)} .hs.stale_chain{color:var(--red)} .hs.one_sided{color:var(--amber)}
+  .tape .fields{color:var(--dim);overflow:hidden;text-overflow:ellipsis}
+
+  .note{font-size:10px;color:var(--dimmer);line-height:1.5}
+  .demo-pill{display:inline-block;font-size:9px;letter-spacing:.12em;color:var(--amber);border:1px solid #5a3f10;background:#1a1306;border-radius:4px;padding:1px 6px}
+  .skate-credit{display:flex;align-items:center;gap:9px;padding:9px 11px;border:1px solid #2c3a12;border-radius:7px;background:linear-gradient(180deg,#0f1505,#0a0d04);font-size:10px;color:var(--dim);letter-spacing:.04em}
+  .skate-credit .sklogo{height:22px;width:auto;filter:drop-shadow(0 0 5px #c4f53a99)}
+  .skate-credit b{color:var(--skate);font-weight:700}
+  .tempo-link{display:flex;align-items:center;gap:8px;margin-top:10px;padding:8px 11px;border-radius:6px;text-decoration:none;font-size:11px;letter-spacing:.08em;color:var(--skate);border:1px solid #3a4a12;background:linear-gradient(180deg,#141b06,#0c1004);box-shadow:inset 0 0 14px #c4f53a14;transition:.12s}
+  .tempo-link:hover{box-shadow:inset 0 0 20px #c4f53a2e,0 0 14px #c4f53a33;border-color:#5a7016}
+  .tempo-link .ext{margin-left:auto;font-size:13px}
+  .tempo-link .sess-dot{width:8px;height:8px;border-radius:50%;background:var(--skate);box-shadow:0 0 9px var(--skate);animation:sesspulse 1.3s infinite}
+  @keyframes sesspulse{0%,100%{opacity:1}50%{opacity:.35}}
+  .tempo-link.disabled{color:var(--dim);border-color:var(--line2);background:#0a0d12;box-shadow:none;pointer-events:none;opacity:.6}
+  .tempo-link.disabled .sess-dot{background:var(--dimmer);box-shadow:none;animation:none}
+  a{color:var(--cyan);text-decoration:none}
+  ::-webkit-scrollbar{width:9px;height:9px}::-webkit-scrollbar-thumb{background:#16202e;border-radius:6px}
+  .err-banner{display:none;background:#2a0f15;color:#ffb0bc;border:1px solid #5a2230;padding:8px 12px;border-radius:6px;font-size:11px}
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="brand">
+      <img class="logo" id="brandimg" src="/skate_logo.png" alt="Skate"
+           onerror="this.style.display='none';document.getElementById('logo-fallback').style.display='block'"/>
+      <svg class="logo" id="logo-fallback" style="display:none" viewBox="0 0 134 134" xmlns="http://www.w3.org/2000/svg" aria-label="Skate">
+        <defs><filter id="skg" x="-60%" y="-60%" width="220%" height="220%">
+          <feDropShadow dx="0" dy="0" stdDeviation="3.4" flood-color="#c4f53a" flood-opacity="0.9"/>
+        </filter></defs>
+        <g fill="#c4f53a" filter="url(#skg)" transform="translate(20 4)">
+          <rect x="40" y="6"   width="22" height="22" rx="6" transform="rotate(-7 51 17)"/>
+          <rect x="66" y="20"  width="22" height="22" rx="6" transform="rotate(6 77 31)"/>
+          <rect x="14" y="40"  width="22" height="22" rx="6" transform="rotate(5 25 51)"/>
+          <rect x="40" y="56"  width="22" height="22" rx="6" transform="rotate(-6 51 67)"/>
+          <rect x="66" y="72"  width="22" height="22" rx="6" transform="rotate(7 77 83)"/>
+          <rect x="14" y="92"  width="22" height="22" rx="6" transform="rotate(-5 25 103)"/>
+          <rect x="40" y="106" width="22" height="22" rx="6" transform="rotate(5 51 117)"/>
+        </g>
+      </svg>
+      OIL&nbsp;ALPHA<small>× SKATE · MPP</small>
+    </div>
+    <span class="tempo"><span class="dot"></span>TEMPO TESTNET</span>
+    <span class="conn" id="conn">IDLE</span>
+    <div class="spacer"></div>
+    <div class="statrow">
+      <div class="stat"><span class="v" id="s-rate">0.0</span><span class="l">MSG / S</span></div>
+      <div class="stat"><span class="v" id="s-tick">—</span><span class="l">TICK ms</span></div>
+      <div class="stat"><span class="v" id="s-seq">—</span><span class="l">SEQ</span></div>
+      <div class="stat"><span class="v" id="s-count">0</span><span class="l">FRAMES</span></div>
+      <span class="pulse" id="pulse"></span>
+    </div>
+  </header>
+
+  <div class="body">
+    <!-- LEFT: controls + MPP -->
+    <div class="col left">
+      <div class="err-banner" id="err"></div>
+
+      <div class="card">
+        <h3>STREAM <span class="tag" id="price-tag">—</span></h3>
+        <label class="fld">SYMBOL</label>
+        <select id="sym"></select>
+        <div style="height:8px"></div>
+        <label class="fld">MINUTES TO BUY</label>
+        <div class="row2">
+          <input id="mins" type="number" min="1" max="60" value="2"/>
+          <input id="cost" value="$0.20" disabled/>
+        </div>
+        <div style="height:10px"></div>
+        <button class="btn-ghost btn-wide" id="btn-wallet">⚡ CONNECT TEMPO WALLET</button>
+        <div class="kv" style="margin-top:6px"><span class="k">WALLET</span><span class="v mono" id="m-wallet">not connected</span></div>
+        <div style="height:10px"></div>
+        <div class="btns">
+          <button class="btn-sub" id="btn-sub">▶ SUBSCRIBE</button>
+          <button class="btn-unsub" id="btn-unsub" disabled>■ UNSUBSCRIBE</button>
+          <button class="btn-ghost btn-wide" id="btn-disc" disabled>DISCONNECT SESSION</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>MPP SESSION <span class="tag">TEMPO · x402 · ERC-3009</span></h3>
+        <div class="kv"><span class="k">STATUS</span><span class="v" id="m-status">no session</span></div>
+        <div class="kv"><span class="k">PAYER</span><span class="v mono" id="m-payer">—</span></div>
+        <div class="kv"><span class="k">CHAIN · TOKEN</span><span class="v" id="m-chain">—</span></div>
+        <div class="kv"><span class="k">SESSION REF</span><span class="v mono" id="m-ref">—</span></div>
+        <div class="kv"><span class="k">SETTLEMENT</span><span class="v" id="m-settle">—</span></div>
+        <a class="tempo-link disabled" id="m-explorer" href="#" target="_blank" rel="noopener noreferrer">
+          <span class="sess-dot" id="m-sessdot"></span>
+          <span id="m-explorer-label">NO ACTIVE SESSION</span>
+          <span class="ext">↗</span>
+        </a>
+      </div>
+
+      <div class="card">
+        <h3>PAYMENT LEDGER</h3>
+        <div class="kv"><span class="k">PAYER BALANCE</span><span class="v good" id="m-bal">—</span></div>
+        <div class="kv"><span class="k">PAID (SESSION)</span><span class="v" id="m-made">$0.0000</span></div>
+        <div class="kv"><span class="k">PAYMENTS</span><span class="v" id="m-npay">0</span></div>
+        <div class="kv"><span class="k">WINDOW LEFT</span><span class="v warn" id="m-left">—</span></div>
+        <div class="kv"><span class="k">VALUE LEFT</span><span class="v" id="m-vleft">—</span></div>
+        <div class="bar" id="m-barwrap"><i id="m-bar" style="width:0%"></i></div>
+        <div style="height:8px"></div>
+        <label class="fld">AUTO-RENEW (in-band voucher top-up)</label>
+        <div class="row2">
+          <select id="autorenew"><option value="1">ENABLED</option><option value="0">DISABLED</option></select>
+          <button class="btn-ghost" id="btn-topup" disabled>TOP UP NOW</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>DEMO PAYER KEY <span class="tag"><span class="demo-pill">TESTNET</span></span></h3>
+        <input id="pk" value="0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"/>
+        <div style="height:8px"></div>
+        <div class="note">Well-known test key — signs the ERC-3009 voucher in your browser; the voucher settles via <b style="color:var(--skate)">MPP on Tempo Testnet</b>. Balance is simulated (settlement stubbed). Never paste a real key.</div>
+      </div>
+
+      <div class="skate-credit">
+        <img class="sklogo" src="/skate_logo.png" alt="Skate" onerror="this.style.display='none'"/>
+        <span>Powered by <b>Skate</b> · MPP pay-per-minute on <b>Tempo Testnet</b></span>
+      </div>
+    </div>
+
+    <!-- MAIN -->
+    <div class="col main">
+      <div class="heroes" id="heroes"></div>
+      <div class="panes">
+        <div class="charts" id="charts"></div>
+        <div class="tiles" id="tiles"></div>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    <div class="tape-h"><span>RAW SNAPSHOT TAPE</span><span id="tape-meta">awaiting subscription…</span></div>
+    <div class="tape" id="tape"></div>
+  </footer>
+</div>
+
+<script src="/mpp.js"></script>
+<script type="module">
+let privateKeyToAccount;
+try {
+  ({ privateKeyToAccount } = await import('https://esm.sh/viem@2.21.0/accounts'));
+} catch (e) {
+  document.getElementById('err').style.display='block';
+  document.getElementById('err').textContent='Failed to load viem from CDN: '+e.message;
+}
+
+// ── origins (same-origin → works through the tunnel) ──
+const ORIGIN = location.origin;
+const WS_ORIGIN = (location.protocol==='https:'?'wss:':'ws:')+'//'+location.host;
+// Tempo TESTNET explorer. Active session links to the payer wallet's page.
+const EXPLORER_BASE = 'https://explore.testnet.tempo.xyz';
+const EXPLORER_ADDR = (a) => `${EXPLORER_BASE}/address/${a}`;
+
+// ── b64url ──
+const _enc=new TextEncoder(), _dec=new TextDecoder();
+const b64u=(s)=>{let b='';for(const c of _enc.encode(s))b+=String.fromCharCode(c);return btoa(b).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');};
+const b64uD=(s)=>{s=s.replace(/-/g,'+').replace(/_/g,'/');const bin=atob(s);const a=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)a[i]=bin.charCodeAt(i);return _dec.decode(a);};
+
+// ── formatters ──
+const f2=v=>v==null?'—':(+v).toFixed(2);
+const f3=v=>v==null?'—':(+v).toFixed(3);
+const fiv=v=>v==null?'—':((+v)*100).toFixed(1)+'%';
+const ffund=v=>v==null?'—':((+v)*1e6).toFixed(1)+'µ';
+const fusd=v=>'$'+(+v).toFixed(4);
+
+const FIELDS=[
+  {k:'rr25',label:'25Δ RISK REV',grp:'OPTIONS',fmt:f3},
+  {k:'rr25_d4h',label:'ΔRR (4h)',grp:'OPTIONS',fmt:f3},
+  {k:'skew_signal',label:'SKEW SIGNAL',grp:'OPTIONS',fmt:f3},
+  {k:'atm_iv',label:'ATM IV',grp:'STRUCTURE',fmt:fiv},
+  {k:'gex_put_wall',label:'GEX PUT WALL',grp:'STRUCTURE',fmt:f2},
+  {k:'gex_call_wall',label:'GEX CALL WALL',grp:'STRUCTURE',fmt:f2},
+  {k:'spot_vs_walls',label:'SPOT vs WALLS',grp:'STRUCTURE',fmt:f3},
+  {k:'iv_term_slope',label:'IV TERM SLOPE',grp:'STRUCTURE',fmt:f3},
+  {k:'cme_fwd_mid',label:'CME FWD MID',grp:'PRICE',fmt:f2},
+  {k:'cme_hl_basis_bps',label:'CME–HL BASIS',grp:'PRICE',fmt:f2},
+  {k:'signed_flow_10',label:'SIGNED FLOW',grp:'MICRO',fmt:f3},
+  {k:'imb_5',label:'BOOK IMB',grp:'MICRO',fmt:f3},
+  {k:'funding',label:'FUNDING',grp:'MICRO',fmt:ffund},
+];
+const HEROES=[
+  {k:'cme_fwd_mid',label:'CME FWD MID',fmt:f2,color:'#3fc7ff'},
+  {k:'skew_signal',label:'SKEW SIGNAL',fmt:f3,color:'#00e58c'},
+  {k:'rr25',label:'25Δ RR',fmt:f3,color:'#a78bfa'},
+  {k:'signed_flow_10',label:'SIGNED FLOW',fmt:f3,color:'#ffb547'},
+];
+const CHARTS=[
+  {k:'cme_fwd_mid',label:'CME FWD MID',fmt:f2,color:'#3fc7ff'},
+  {k:'skew_signal',label:'SKEW SIGNAL (alpha)',fmt:f3,color:'#00e58c',zero:true},
+  {k:'rr25',label:'25Δ RISK REVERSAL',fmt:f3,color:'#a78bfa',zero:true},
+  {k:'signed_flow_10',label:'HL SIGNED FLOW',fmt:f3,color:'#ffb547',zero:true},
+];
+
+// ── DOM refs ──
+const $=id=>document.getElementById(id);
+const symSel=$('sym'), minsEl=$('mins'), costEl=$('cost'), pkEl=$('pk');
+const connEl=$('conn'), pulseEl=$('pulse'), markEl=$('brandimg');
+
+// ── state ──
+let skills=[], pricePerMin=0.10, ws=null, sym='CL';
+let sessionState='idle'; // idle|paying|live|paused|expired|err
+let active=false, expiresAt=0, sessionRef='', payerAddr='';
+let paidTotal=0, nPay=0, walletBal=null, lastChainLabel='';
+let frames=0, lastMsg=0, rate=0, lastSeq=0, lastTickMs=0;
+let userClosed=false, reconnTimer=null, reconnDelay=1500; // auto-reconnect state
+const cur={}; // k -> {v, ts}
+const prevV={}; // k -> previous numeric
+
+// ── build skill list ──
+async function loadSkills(){
+  try{
+    const r=await fetch(ORIGIN+'/skills'); skills=await r.json();
+    symSel.innerHTML=skills.map(s=>`<option value="${s.symbol}">${s.symbol} — ${s.name.split('(')[0].trim()}  ·  $${s.pricePerMinuteUsd}/min</option>`).join('');
+    onSymChange();
+  }catch(e){ banner('Could not load /skills: '+e.message); }
+}
+function onSymChange(){
+  sym=symSel.value||'CL';
+  const sk=skills.find(s=>s.symbol===sym); pricePerMin=sk?sk.pricePerMinuteUsd:0.10;
+  $('price-tag').textContent='$'+pricePerMin+'/min';
+  recalcCost();
+}
+function recalcCost(){ const m=Math.max(1,+minsEl.value||1); costEl.value='$'+(pricePerMin*m).toFixed(4); }
+symSel.onchange=onSymChange; minsEl.oninput=recalcCost;
+
+function banner(t){ const e=$('err'); e.style.display='block'; e.textContent=t; }
+
+// ── MPP handshake ──
+function parseChallenge(www){
+  const p={}; const re=/(\w+)="([^"\\]*)"/g; let m;
+  while((m=re.exec(www))) p[m[1]]=m[2];
+  if(!p.request) throw new Error('challenge missing request');
+  return {...p, request: JSON.parse(b64uD(p.request))};
+}
+async function buildVoucher(){
+  const minutes=Math.max(1,+minsEl.value||1);
+  const r=await fetch(`${ORIGIN}/ws/challenge/${sym}?minutes=${minutes}`);
+  if(r.status!==402) throw new Error('expected 402, got '+r.status);
+  const www=r.headers.get('www-authenticate'); if(!www) throw new Error('no WWW-Authenticate');
+  const ch=parseChallenge(www);
+  const {amount,currency,recipient}=ch.request;
+  const chainId=ch.request.methodDetails?.chainId??143;
+  const chainName=ch.request.methodDetails?.chainName??'Tempo Testnet';
+  lastChainLabel=`${chainName} · USDC`;
+  const account=privateKeyToAccount(pkEl.value.trim());
+  payerAddr=account.address;
+  const nb=crypto.getRandomValues(new Uint8Array(32));
+  const nonce='0x'+[...nb].map(b=>b.toString(16).padStart(2,'0')).join('');
+  const validBefore=String(Math.floor(Date.now()/1000)+300);
+  const signature=await account.signTypedData({
+    domain:{name:'USDC',version:'2',chainId,verifyingContract:currency},
+    types:{TransferWithAuthorization:[
+      {name:'from',type:'address'},{name:'to',type:'address'},{name:'value',type:'uint256'},
+      {name:'validAfter',type:'uint256'},{name:'validBefore',type:'uint256'},{name:'nonce',type:'bytes32'}]},
+    primaryType:'TransferWithAuthorization',
+    message:{from:payerAddr,to:recipient,value:BigInt(amount),validAfter:0n,validBefore:BigInt(validBefore),nonce},
+  });
+  const wire={
+    challenge:{request:b64u(JSON.stringify(ch.request))},
+    payload:{type:'authorization',from:payerAddr,to:recipient,value:amount,validAfter:'0',validBefore,nonce,signature},
+    source:`did:pkh:eip155:${chainId}:${payerAddr}`,
+  };
+  return {wire:b64u(JSON.stringify(wire)), amountUsd:Number(amount)/1e6, minutes};
+}
+
+function loadBal(addr){
+  const k='oilalpha:bal:'+addr.toLowerCase();
+  let v=localStorage.getItem(k); if(v==null){ v='50'; localStorage.setItem(k,v); }
+  return parseFloat(v);
+}
+function saveBal(addr,v){ localStorage.setItem('oilalpha:bal:'+addr.toLowerCase(), String(v)); }
+
+async function subscribe(){
+  if(!privateKeyToAccount){ banner('viem not loaded'); return; }
+  // already-open session that's just paused → resume without paying
+  if(ws && ws.readyState===1 && !active){
+    ws.send(JSON.stringify({t:'subscribe',symbols:[sym]})); return;
+  }
+  if(ws && ws.readyState===1 && active) return; // already streaming
+  userClosed=false;
+  setState('paying');
+  try{
+    if(mmAddr){
+      try{ await payOnChain(); }
+      catch(e){ banner('MetaMask payment cancelled/failed: '+(e.message||e)); setState('idle'); return; }
+    }
+    const v=await buildVoucher();
+    walletBal=loadBal(payerAddr);
+    if(walletBal < v.amountUsd){ banner('Demo balance too low ($'+walletBal.toFixed(4)+'). Resetting to $50.'); walletBal=50; }
+    const url=`${WS_ORIGIN}/ws/stream/${sym}?payment=${encodeURIComponent(v.wire)}`;
+    ws=new WebSocket(url);
+    ws.pendingPay={amountUsd:v.amountUsd};
+    ws.onopen=()=>{ reconnDelay=1500; };  // server emits receipt+subscription
+    ws.onmessage=onWs;
+    ws.onclose=(e)=>{
+      active=false; renderMpp(); paintButtons();
+      if(!userClosed && e.code!==1000){
+        // unexpected drop (e.g. server restart, network blip) → auto re-pay + reconnect
+        setState('paying');
+        $('tape-meta').textContent='link dropped (code '+e.code+') — reconnecting…';
+        scheduleReconnect();
+      } else {
+        if(sessionState!=='expired') setState(e.code===1000?'expired':'idle');
+        $('tape-meta').textContent='session closed ('+e.code+')';
+      }
+    };
+    ws.onerror=()=>{ /* close handler drives reconnect */ };
+  }catch(e){ banner('Subscribe failed: '+e.message); setState('idle'); scheduleReconnect(); }
+}
+function scheduleReconnect(){
+  if(userClosed) return;
+  clearTimeout(reconnTimer);
+  reconnTimer=setTimeout(()=>{ if(!userClosed) subscribe(); }, reconnDelay);
+  reconnDelay=Math.min(Math.round(reconnDelay*1.6), 8000);
+}
+function unsubscribe(){ if(ws&&ws.readyState===1) ws.send(JSON.stringify({t:'unsubscribe',symbols:[sym]})); }
+async function disconnect(){
+  userClosed=true; clearTimeout(reconnTimer);
+  // Close the on-chain payment channel (MetaMask popup) → settle + refund.
+  if(window.MPP && MPP.channelId){
+    try{ banner('Confirm channel close in MetaMask…'); await MPP.closeSession();
+      $('m-settle').textContent='channel closed (settled on Tempo)'; banner('Session closed on Tempo. Refund of unused deposit settled.'); }
+    catch(e){ banner('Channel close failed: '+(e.message||e)); }
+  }
+  if(ws){ try{ws.close(1000,'user');}catch{} } ws=null; active=false; setState('idle'); renderMpp(); paintButtons();
+}
+
+async function topUp(){
+  if(!(ws&&ws.readyState===1)) return;
+  try{
+    const v=await buildVoucher();
+    if(walletBal!=null && walletBal>=v.amountUsd){ /* will deduct on receipt */ }
+    ws.pendingPay={amountUsd:v.amountUsd};
+    ws.send(JSON.stringify({t:'authorization',credential:v.wire}));
+  }catch(e){ banner('Top-up failed: '+e.message); }
+}
+
+// ── WS message handling ──
+function onWs(ev){
+  let m; try{ m=JSON.parse(ev.data);}catch{ return; }
+  if(m.t==='payment-receipt'){
+    sessionRef=m.reference; expiresAt=m.expiresAt;
+    const pay=ws.pendingPay?.amountUsd||0;
+    if(pay){ paidTotal+=pay; nPay++; if(walletBal!=null){ walletBal=Math.max(0,walletBal-pay); saveBal(payerAddr,walletBal);} ws.pendingPay=null; }
+    setState('live'); renderMpp(); paintButtons();
+    return;
+  }
+  if(m.t==='subscription'){
+    active=m.active.includes(sym);
+    setState(active?'live':'paused');
+    $('tape-meta').textContent=`active=[${m.active.join(',')}]  entitled=[${m.entitled.join(',')}]`;
+    paintButtons();
+    return;
+  }
+  if(m.t==='payment-need-voucher'){
+    $('tape-meta').textContent='⚠ '+m.reason;
+    if($('autorenew').value==='1') topUp();
+    return;
+  }
+  if(m.t==='error'){ banner('server: '+m.code+' — '+m.message); return; }
+  if(m.t==='snapshot'){ ingest(m.data); return; }
+}
+
+function ingest(d){
+  const now=performance.now();
+  if(lastMsg){ const dt=now-lastMsg; lastTickMs=dt; rate = rate? rate*0.8 + (1000/dt)*0.2 : 1000/dt; }
+  lastMsg=now; frames++; lastSeq=d.seq;
+  // pulse
+  pulseEl.classList.add('on'); if(markEl) markEl.style.filter='drop-shadow(0 0 13px #3fc7ff)';
+  clearTimeout(ingest._pt); ingest._pt=setTimeout(()=>{pulseEl.classList.remove('on'); if(markEl) markEl.style.filter='drop-shadow(0 0 7px #c4f53a66)';},90);
+  // store + flash tiles
+  for(const f of FIELDS){
+    const fv=d.fields[f.k]; const v=fv?fv.v:null;
+    cur[f.k]={v, ts: fv?fv.ts:Date.now()};
+    const tile=tileEls[f.k]; if(!tile) continue;
+    if(v==null){ tile.el.classList.add('null'); tile.val.textContent='—'; tile.arrow.textContent=''; }
+    else{
+      tile.el.classList.remove('null');
+      const pv=prevV[f.k];
+      tile.val.textContent=f.fmt(v);
+      if(pv!=null && v!==pv){
+        const up=v>pv; tile.arrow.textContent=up?'▲':'▼'; tile.arrow.className='arrow '+(up?'up':'dn');
+        tile.el.classList.remove('flash-up','flash-dn'); void tile.el.offsetWidth;
+        tile.el.classList.add(up?'flash-up':'flash-dn');
+        clearTimeout(tile._t); tile._t=setTimeout(()=>tile.el.classList.remove('flash-up','flash-dn'),420);
+      }
+      prevV[f.k]=v;
+    }
+  }
+  // charts + heroes ring buffers
+  for(const s of sparks){ const fv=d.fields[s.key]; s.push(fv?fv.v:null); }
+  for(const h of heroBufs){ const fv=d.fields[h.key]; h.push(fv?fv.v:null); }
+  // health + tape
+  pushTape(d);
+  $('s-seq').textContent=d.seq;
+  $('s-count').textContent=frames;
+}
+
+// ── tape ──
+const tapeEl=$('tape');
+function pushTape(d){
+  const row=document.createElement('div'); row.className='t';
+  const fwd=d.fields.cme_fwd_mid?.v, sk=d.fields.skew_signal?.v, rr=d.fields.rr25?.v;
+  row.innerHTML=`<span class="seq">#${d.seq}</span>`+
+    `<span class="hs ${d.health}">${d.health}</span>`+
+    `<span>${new Date(d.ts).toLocaleTimeString('en-GB',{hour12:false})}.${String(d.ts%1000).padStart(3,'0')}</span>`+
+    `<span class="fields">fwd ${f2(fwd)} · skew ${f3(sk)} · rr ${f3(rr)} · flow ${f3(d.fields.signed_flow_10?.v)} · iv ${fiv(d.fields.atm_iv?.v)}</span>`;
+  tapeEl.prepend(row);
+  while(tapeEl.childNodes.length>60) tapeEl.removeChild(tapeEl.lastChild);
+}
+
+// ── render MPP panels ──
+function setState(s){
+  sessionState=s; active = s==='live';
+  const c=connEl; c.className='conn '+(s==='live'?'live':s==='paying'?'paying':s==='paused'?'paused':s==='expired'?'expired':s==='err'?'err':'');
+  c.textContent={idle:'IDLE',paying:'PAYING…',live:'● LIVE',paused:'PAUSED',expired:'EXPIRED',err:'ERROR'}[s]||s.toUpperCase();
+}
+function renderMpp(){
+  $('m-status').textContent = sessionState==='live'?'established':sessionState==='paused'?'paused (paid)':sessionState==='expired'?'expired':sessionState==='paying'?'verifying…':'no session';
+  $('m-status').className='v '+(sessionState==='live'?'good':sessionState==='expired'?'bad':sessionState==='paused'?'warn':'');
+  $('m-payer').textContent=payerAddr?payerAddr.slice(0,7)+'…'+payerAddr.slice(-5):'—';
+  $('m-chain').textContent=lastChainLabel||'—';
+  $('m-ref').textContent=sessionRef?sessionRef.slice(0,10)+'…':'—';
+  $('m-settle').innerHTML=sessionRef?'<span class="good">stubbed ✓</span>':'—';
+  $('m-bal').textContent=walletBal!=null?fusd(walletBal):'—';
+  $('m-made').textContent=fusd(paidTotal);
+  $('m-npay').textContent=nPay;
+  // clickable Tempo testnet link — active only with a live/paused (paid) session
+  const link=$('m-explorer');
+  const sessionActive=(sessionState==='live'||sessionState==='paused') && !!sessionRef;
+  if(sessionActive){
+    link.classList.remove('disabled');
+    link.href = payerAddr ? EXPLORER_ADDR(payerAddr) : EXPLORER_BASE;
+    $('m-explorer-label').textContent='ACTIVE SESSION · VIEW WALLET ON TEMPO';
+  } else {
+    link.classList.add('disabled');
+    link.href = EXPLORER_BASE;
+    $('m-explorer-label').textContent='NO ACTIVE SESSION';
+  }
+}
+function paintButtons(){
+  const open = ws&&ws.readyState===1;
+  $('btn-unsub').disabled = !(open&&active);
+  $('btn-disc').disabled = !open;
+  $('btn-topup').disabled = !open;
+  const sub=$('btn-sub');
+  if(open&&!active){ sub.textContent='▶ RESUME'; sub.disabled=false; }
+  else if(open&&active){ sub.textContent='● STREAMING'; sub.disabled=true; }
+  else { sub.textContent='▶ SUBSCRIBE'; sub.disabled=(sessionState==='paying'); }
+}
+
+// ── tiles DOM ──
+const tileEls={};
+(function buildTiles(){
+  const wrap=$('tiles');
+  for(const f of FIELDS){
+    const el=document.createElement('div'); el.className='tile null';
+    el.innerHTML=`<div class="tl"><span>${f.label}</span><span class="grp">${f.grp}</span></div>`+
+      `<div class="tv"><span class="v">—</span><span class="arrow"></span></div><div class="age" data-k="${f.k}">—</div>`;
+    wrap.appendChild(el);
+    tileEls[f.k]={el, val:el.querySelector('.v'), arrow:el.querySelector('.arrow'), age:el.querySelector('.age')};
+  }
+})();
+
+// ── heroes DOM + buffers ──
+const heroBufs=[];
+(function buildHeroes(){
+  const wrap=$('heroes');
+  for(const h of HEROES){
+    const el=document.createElement('div'); el.className='hero';
+    el.innerHTML=`<span class="hl">${h.label}</span><span class="hv" data-k="${h.k}">—</span><span class="hsub" data-sub="${h.k}"></span><canvas></canvas>`;
+    wrap.appendChild(el);
+    const buf=new Ring(120); buf.key=h.k; buf.color=h.color; buf.canvas=el.querySelector('canvas');
+    buf.valEl=el.querySelector('.hv'); buf.fmt=h.fmt;
+    heroBufs.push(buf);
+  }
+})();
+
+// ── charts DOM + sparks ──
+const sparks=[];
+(function buildCharts(){
+  const wrap=$('charts');
+  for(const c of CHARTS){
+    const el=document.createElement('div'); el.className='chart';
+    el.innerHTML=`<span class="ctitle">${c.label}</span><span class="cval" data-k="${c.k}" style="color:${c.color}">—</span><canvas></canvas>`;
+    wrap.appendChild(el);
+    const s=new Ring(280); s.key=c.k; s.color=c.color; s.canvas=el.querySelector('canvas');
+    s.valEl=el.querySelector('.cval'); s.fmt=c.fmt; s.zero=!!c.zero; s.big=true;
+    sparks.push(s);
+  }
+})();
+
+function Ring(cap){ this.cap=cap; this.d=[]; }
+Ring.prototype.push=function(v){ this.d.push((v==null||isNaN(v))?null:+v); if(this.d.length>this.cap)this.d.shift(); };
+
+// ── render loop (decoupled from data → smooth HFT feel) ──
+function fit(cv){ const dpr=Math.min(2,devicePixelRatio||1); const w=cv.clientWidth,h=cv.clientHeight; if(cv.width!==w*dpr||cv.height!==h*dpr){cv.width=w*dpr;cv.height=h*dpr;} return {dpr,w,h}; }
+function drawRing(r){
+  const cv=r.canvas; if(!cv) return; const {dpr,w,h}=fit(cv); const ctx=cv.getContext('2d');
+  ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,w,h);
+  const data=r.d.filter(x=>x!=null);
+  if(r.valEl){ const last=[...r.d].reverse().find(x=>x!=null); r.valEl.textContent=last==null?'—':r.fmt(last); }
+  if(data.length<2) return;
+  let mn=Math.min(...data), mx=Math.max(...data);
+  if(r.zero){ const a=Math.max(Math.abs(mn),Math.abs(mx),0.001); mn=-a; mx=a; }
+  if(mn===mx){ mn-=1; mx+=1; }
+  const pad=(mx-mn)*0.12||1; mn-=pad; mx+=pad;
+  const padT=r.big?16:2, padB=r.big?6:2;
+  const X=i=>(i/(r.cap-1))*w;
+  const Y=v=>padT+(1-(v-mn)/(mx-mn))*(h-padT-padB);
+  // grid (big charts only)
+  if(r.big){ ctx.strokeStyle='#0e1622'; ctx.lineWidth=1; for(let g=0;g<=3;g++){const y=padT+g/3*(h-padT-padB); ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(w,y);ctx.stroke();}
+    if(r.zero){ ctx.strokeStyle='#1c2a3a'; const yz=Y(0); ctx.beginPath();ctx.moveTo(0,yz);ctx.lineTo(w,yz);ctx.stroke(); } }
+  // offset so the line is right-aligned (newest at right edge)
+  const off=r.cap-r.d.length;
+  // fill
+  const start=r.d.findIndex(x=>x!=null);
+  ctx.beginPath(); let started=false; let lastX=0,lastY=0;
+  for(let i=0;i<r.d.length;i++){ const v=r.d[i]; if(v==null)continue; const x=X(i+off), y=Y(v); if(!started){ctx.moveTo(x,y);started=true;} else ctx.lineTo(x,y); lastX=x;lastY=y; }
+  const grad=ctx.createLinearGradient(0,0,0,h); grad.addColorStop(0,r.color+'33'); grad.addColorStop(1,r.color+'00');
+  ctx.lineTo(lastX,h); ctx.lineTo(X(start+off),h); ctx.closePath(); ctx.fillStyle=grad; ctx.fill();
+  // line
+  ctx.beginPath(); started=false;
+  for(let i=0;i<r.d.length;i++){ const v=r.d[i]; if(v==null)continue; const x=X(i+off), y=Y(v); if(!started){ctx.moveTo(x,y);started=true;} else ctx.lineTo(x,y); }
+  ctx.strokeStyle=r.color; ctx.lineWidth=r.big?1.6:1.3; ctx.shadowColor=r.color; ctx.shadowBlur=r.big?8:4; ctx.stroke(); ctx.shadowBlur=0;
+  // last point
+  ctx.beginPath(); ctx.arc(lastX,lastY,r.big?3:2.2,0,7); ctx.fillStyle=r.color; ctx.fill();
+  if(r.big){ ctx.fillStyle=r.color+'22'; ctx.fillRect(lastX-0.5,padT,1,h-padT-padB); }
+}
+
+function loop(){
+  for(const s of sparks) drawRing(s);
+  for(const h of heroBufs) drawRing(h);
+  // header stats
+  $('s-rate').textContent=rate?rate.toFixed(1):'0.0';
+  $('s-tick').textContent=lastTickMs?Math.round(lastTickMs):'—';
+  // tile ages
+  const now=Date.now();
+  for(const f of FIELDS){ const c=cur[f.k]; const t=tileEls[f.k]; if(c&&c.v!=null){ t.age.textContent=Math.max(0,Math.round((now-c.ts)))+'ms'; } }
+  // payment window countdown
+  if(sessionState==='live'||sessionState==='paused'){
+    const left=Math.max(0,expiresAt-Date.now());
+    const ss=Math.floor(left/1000); const mm=Math.floor(ss/60);
+    $('m-left').textContent=`${mm}:${String(ss%60).padStart(2,'0')}`;
+    const vleft=(left/60000)*pricePerMin; $('m-vleft').textContent=fusd(vleft);
+    const totalMs=(Math.max(1,+minsEl.value||1))*60000;
+    const pct=Math.max(0,Math.min(100,left/totalMs*100));
+    $('m-bar').style.width=pct+'%'; $('m-barwrap').classList.toggle('low',pct<25);
+    if(left<=0 && ws){ /* server will close; reflect */ }
+  } else { $('m-left').textContent='—'; $('m-vleft').textContent='—'; $('m-bar').style.width='0%'; }
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+// ── MetaMask + real Tempo settlement ────────────────────────────────────────
+// Connect MetaMask, switch to Tempo testnet, and on Subscribe send a REAL
+// pathUSD transfer (the session payment) → a transaction visible on the Tempo
+// explorer. The WS data auth still uses the in-page demo voucher; the MetaMask
+// transfer is the on-chain, explorer-visible "session transaction".
+const TEMPO = {
+  chainId: '0xa5bf', // 42431
+  chainName: 'Tempo Testnet',
+  rpcUrls: ['https://rpc.moderato.tempo.xyz'],
+  blockExplorerUrls: ['https://explore.testnet.tempo.xyz'],
+  nativeCurrency: { name: 'Tempo Gas', symbol: 'GAS', decimals: 18 },
+};
+const PATHUSD = '0x20c0000000000000000000000000000000000000';     // TIP-20 pathUSD (6dp)
+const COLLECTOR = '0x6197d5F6D345e92125c33205ceD41b1fA2E46AE1';   // demo payment recipient
+let mmAddr = null;
+const pad32 = (h) => h.replace(/^0x/, '').padStart(64, '0');
+
+// Read the on-chain pathUSD balance (6 decimals) for an address via Tempo RPC.
+async function fetchPathBal(addr){
+  try{
+    const r = await fetch(TEMPO.rpcUrls[0], { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ jsonrpc:'2.0', id:1, method:'eth_call',
+        params:[{ to:PATHUSD, data:'0x70a08231'+pad32(addr.toLowerCase()) }, 'latest'] }) });
+    const j = await r.json();
+    if(!j.result || j.result==='0x') return null;
+    return Number(BigInt(j.result)) / 1e6;
+  }catch(e){ return null; }
+}
+async function refreshPathBal(){
+  if(!mmAddr) return;
+  const b = await fetchPathBal(mmAddr);
+  if(b!=null){ walletBal=b; $('m-bal').textContent = b.toLocaleString(undefined,{maximumFractionDigits:2})+' pathUSD'; }
+}
+
+async function connectWallet(){
+  if(!window.MPP){ banner('MPP client (mpp.js) not loaded yet — reload.'); return; }
+  try{
+    mmAddr = await MPP.connect();              // in-browser Tempo wallet (auto-funded); MetaMask can't sign Tempo tx type
+    MPP.onChannelUpdate((e)=>{ if(e&&e.channelId) $('m-ref').textContent=String(e.channelId).slice(0,18)+'…'; });
+    $('m-wallet').textContent = mmAddr.slice(0,8)+'…'+mmAddr.slice(-4);
+    $('btn-wallet').textContent = '⚡ '+mmAddr.slice(0,6)+'…'+mmAddr.slice(-4)+' (Tempo)';
+    $('m-payer').textContent = mmAddr.slice(0,10)+'…';
+    await refreshPathBal();
+    banner('Tempo wallet ready (auto-funded). Subscribe opens a real on-chain payment channel.');
+  }catch(e){ banner('Connect failed: '+(e.message||e)); }
+}
+
+// Open a real mppx payment channel: paid fetch → on-chain DEPOSIT (MetaMask popup).
+async function payOnChain(){
+  banner('Confirm the deposit in MetaMask to open the session channel…');
+  const { channelId, status } = await MPP.openSession(ORIGIN+'/mpp/session');
+  const link=$('m-explorer'); link.classList.remove('disabled');
+  link.href = MPP.EXPLORER+'/address/'+mmAddr;          // deposit/close txs show on the payer page
+  $('m-explorer-label').textContent='SESSION CHANNEL · VIEW ON TEMPO';
+  $('m-sessdot') && ($('m-sessdot').style.background='#41f59a');
+  $('m-ref').textContent = (channelId||'').slice(0,18)+'…';
+  $('m-settle').textContent = 'channel open (deposit settled, status '+status+')';
+  $('m-chain').textContent = 'Tempo Testnet · pathUSD';
+  banner('Channel open. Streaming. Disconnect to close on-chain.');
+  setTimeout(refreshPathBal, 3000);
+  return channelId;
+}
+
+$('btn-wallet').onclick=connectWallet;
+
+// ── wire buttons ──
+$('btn-sub').onclick=subscribe;
+$('btn-unsub').onclick=unsubscribe;
+$('btn-disc').onclick=disconnect;
+$('btn-topup').onclick=topUp;
+
+await loadSkills();
+renderMpp(); paintButtons();
+</script>
+</body>
+</html>

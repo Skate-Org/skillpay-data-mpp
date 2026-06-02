@@ -1,0 +1,27 @@
+{
+  "name": "crude-alpha-stream",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Paid WebSocket stream of derived crude-oil alpha signals (CME options skew + microstructure), monetized via MPP on Tempo. Consumes the Databento sidecar; never redistributes raw market data.",
+  "type": "module",
+  "scripts": {
+    "build": "tsc && npm run bundle",
+    "bundle": "esbuild src/client/mpp.ts --bundle --format=iife --platform=browser --outfile=public/mpp.js --define:global=globalThis",
+    "start": "node dist/server.js",
+    "dev": "tsx watch src/server.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "mppx": "^0.6.28",
+    "viem": "^2.21.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.14.0",
+    "@types/ws": "^8.5.10",
+    "tsx": "^4.16.0",
+    "typescript": "^5.5.0"
+  }
+}

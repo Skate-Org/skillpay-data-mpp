@@ -1,0 +1,53 @@
+# crude-alpha-stream — Databento sidecar + paid MPP WebSocket stream.
+#
+# Topology:
+#   sidecar (Databento GLBX.MDP3 live → NDJSON TCP :5051, INTERNAL ONLY)
+#       └── stream (consumes sidecar, computes skew, serves paid WS :7070, PUBLIC)
+#
+# IMPORTANT: run a SINGLE instance. The sidecar holds one Databento Live session;
+# do not horizontally scale it. See README "Deploy to Google Cloud".
+services:
+  sidecar:
+    build: ./sidecar
+    restart: unless-stopped
+    environment:
+      DATABENTO_API_KEY: ${DATABENTO_API_KEY:?set DATABENTO_API_KEY in .env}
+      SIDECAR_PORT: "5051"
+      STRIKES_WINDOW: ${STRIKES_WINDOW:-40}
+    # No host port published — the feed is internal to the compose network only,
+    # reachable by the stream service at host "sidecar". (It carries raw-ish data;
+    # never expose it publicly.)
+    expose:
+      - "5051"
+    networks: [alpha]
+
+  stream:
+    build: ./stream
+    restart: unless-stopped
+    depends_on:
+      - sidecar
+    environment:
+      PORT: "7070"
+      # Connect to the sidecar over the compose network (service name = host).
+      SIDECAR_HOST: sidecar
+      SIDECAR_PORT: "5051"
+      SIDECAR_EMIT_MS: ${SIDECAR_EMIT_MS:-1000}
+      STREAM_CHAIN_LABEL: ${STREAM_CHAIN_LABEL:-Tempo Testnet}
+      # ── MPP payment rail (see README + .env.example) ──
+      STREAM_CHAIN_ID: ${STREAM_CHAIN_ID:-143}
+      STREAM_CURRENCY: ${STREAM_CURRENCY:-0x754704bc059f8c67012fed69bc8a327a5aafb603}
+      STREAM_RECIPIENT: ${STREAM_RECIPIENT:-0x0000000000000000000000000000000000000000}
+      STUB_SETTLEMENT: ${STUB_SETTLEMENT:-true}
+      # Real Tempo MPP payment-channel session route (/mpp/session). Recipient
+      # signing key (also pays settle/close gas in stablecoin) + HMAC secret.
+      MPP_RECIPIENT_KEY: ${MPP_RECIPIENT_KEY:-}
+      MPP_SECRET_KEY: ${MPP_SECRET_KEY:-crude-alpha-stream-prod-secret}
+      MPP_AMOUNT: ${MPP_AMOUNT:-0.05}
+    # Public ingress: clients subscribe to the MPP stream here.
+    ports:
+      - "${STREAM_PORT:-7070}:7070"
+    networks: [alpha]
+
+networks:
+  alpha:
+    driver: bridge

@@ -1,0 +1,24 @@
+# secrets — NEVER commit
+.env
+*.env
+!.env.example
+.mpp-test-key
+.mpp-recipient-key
+.mpp-*
+*.key
+*-key
+*.pem
+*.secret
+
+# node
+node_modules/
+dist/
+*.log
+
+# python
+__pycache__/
+*.pyc
+.venv/
+
+# os
+.DS_Store
