@@ -34,6 +34,15 @@ export const CONFIG = {
   // MPP_TESTNET=true → Tempo testnet (Moderato); default/false → Tempo mainnet.
   isTestnet: process.env.MPP_TESTNET === 'true',
   chainLabel: process.env.MPP_TESTNET === 'true' ? 'Tempo Testnet' : 'Tempo Mainnet',
+  // ── API-key access (alternative to a paid MPP stream token) ────────────────
+  // A client may open the WS with ?apiKey=<k> instead of a paid ?token=. Keys
+  // are a static allowlist from env (comma/space separated). API-key sessions
+  // are NOT payment-metered; each runs for STREAM_API_KEY_SESSION_MINUTES.
+  apiKeys: (process.env.STREAM_API_KEYS ?? '')
+    .split(/[\s,]+/)
+    .map((k) => k.trim())
+    .filter(Boolean),
+  apiKeySessionMinutes: Number(process.env.STREAM_API_KEY_SESSION_MINUTES ?? 1440),
 };
 
 export const MIN_SESSION_MS = 60_000;
