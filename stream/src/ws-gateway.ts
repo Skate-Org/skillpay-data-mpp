@@ -43,15 +43,36 @@ export class WsGateway {
     const skill = STREAM_SKILLS_MAP.get(symbol);
     if (!skill) return this.reject(socket, 404, 'Unknown symbol');
 
-    // Auth = a stream token minted by the Tempo MPP session route. The subscriber
-    // pays one voucher to POST /mpp/session?symbol=:symbol (on-chain on Tempo,
-    // mainnet or testnet per the MPP_TESTNET toggle), receives a token, and opens
-    // the WS with ?token=<t> (browsers) or `Authorization: Bearer <t>` (node).
+    // Auth: accept EITHER a paid MPP stream token OR an allowlisted API key.
+    //  - token: minted by the Tempo MPP session route. The subscriber pays one
+    //    voucher to POST /mpp/session?symbol=:symbol (on-chain on Tempo, mainnet
+    //    or testnet per the MPP_TESTNET toggle), receives a token, and opens the
+    //    WS with ?token=<t> (browsers) or `Authorization: Bearer <t>` (node).
+    //    The session = the token's remaining (paid-for) minutes.
+    //  - apiKey: a static allowlisted key (CONFIG.apiKeys) for unmetered access.
+    //    Sent as ?apiKey=<k> (browsers) or `X-API-Key: <k>` (node). Its session
+    //    runs for CONFIG.apiKeySessionMinutes regardless of payment.
     const authHeader = req.headers.authorization;
     const headerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice('Bearer '.length) : undefined;
     const token = url.searchParams.get('token') ?? headerToken;
+    const apiKey = url.searchParams.get('apiKey') ?? (req.headers['x-api-key'] as string | undefined);
 
-    if (!token) {
+    let sessionDurationMs: number;
+    let reference: string;
+
+    if (apiKey && CONFIG.apiKeys.includes(apiKey)) {
+      sessionDurationMs = Math.max(MIN_SESSION_MS, CONFIG.apiKeySessionMinutes * 60_000);
+      reference = `apikey:${symbol}`;
+      console.log(`[gateway] API-key session start sym=${symbol} ms=${sessionDurationMs}`);
+    } else if (token) {
+      const tv = verifyStreamToken(token, symbol);
+      if (!tv.ok) return this.reject(socket, 402, 'Invalid or expired stream token — pay at /mpp/session');
+      sessionDurationMs = Math.max(MIN_SESSION_MS, (tv.expiresAt ?? Date.now()) - Date.now());
+      reference = `mpp:${symbol}`;
+      console.log(`[gateway] MPP session start sym=${symbol} ms=${sessionDurationMs}`);
+    } else {
+      // No credential at all → 402 with the pay route (an API key is the
+      // alternative for callers who are not paying per-minute).
       socket.write(
         'HTTP/1.1 402 Payment Required\r\n' +
           'Content-Type: application/json\r\n' +
@@ -61,13 +82,8 @@ export class WsGateway {
       return;
     }
 
-    const tv = verifyStreamToken(token, symbol);
-    if (!tv.ok) return this.reject(socket, 402, 'Invalid or expired stream token — pay at /mpp/session');
-
-    const sessionDurationMs = Math.max(MIN_SESSION_MS, (tv.expiresAt ?? Date.now()) - Date.now());
-    console.log(`[gateway] MPP session start sym=${symbol} ms=${sessionDurationMs}`);
     this.wss.handleUpgrade(req, socket, head, (clientWs) => {
-      this.pipeToAlphaStream(clientWs, symbol, sessionDurationMs, `mpp:${symbol}`);
+      this.pipeToAlphaStream(clientWs, symbol, sessionDurationMs, reference);
     });
   }
 
