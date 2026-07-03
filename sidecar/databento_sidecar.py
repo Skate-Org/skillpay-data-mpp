@@ -6,23 +6,26 @@
 # ]
 # ///
 """
-oil1 Databento sidecar (VOLGUARD v1).
+oil1 Databento sidecar (VOLGUARD v2 — multi-product).
 
-Subscribes to GLBX.MDP3 live for:
-  * CL.FUT  (mbp-1 + trades)        — front-month outright resolved from definitions.
-  * LO.OPT  (mbp-1)                  — front 2 expiries, ATM +/- 20 strikes only.
+Subscribes to GLBX.MDP3 live for SEVERAL CME products in ONE Live session and
+re-streams every event as NDJSON over a plain TCP server on $SIDECAR_PORT
+(default 5051). One JSON line per event. Every market event carries a `prod`
+tag so the downstream stream can keep an independent signal state per product.
 
-Re-streams every event as NDJSON over a plain TCP server on
-$SIDECAR_PORT (default 5051). One line per event. Events:
+Products (see PRODUCTS below): WTI (CL/LO), Gold (GC/OG), Silver (SI/SO).
+Each product resolves its own front+next outright future and an ATM ± window of
+options at the product's strike spacing.
 
-  {"t":"bbo","sym":"CLN6","ts":<ns>,"bid":..,"ask":..,"bid_sz":..,"ask_sz":..}
-  {"t":"trade","sym":"CLN6","ts":<ns>,"px":..,"sz":..,"side":"B"|"A"|"N"}
-  {"t":"lo_bbo","sym":"LON6 C10500","ts":<ns>,"bid":..,"ask":..,"strike":...,"is_call":true,"expiry_iso":"2026-06-17","tte_years":..}
-  {"t":"hb","ts":<ns>,"n_fut":<int>,"n_lo":<int>,"front_fut":"CLN6"}
+Events:
+  {"t":"bbo","prod":"CL","sym":"CLN6","ts":<ns>,"bid":..,"ask":..,"bid_sz":..,"ask_sz":..}
+  {"t":"trade","prod":"CL","sym":"CLN6","ts":<ns>,"px":..,"sz":..,"side":"B"|"A"|"N"}
+  {"t":"lo_bbo","prod":"CL","sym":"LON6 C10500","ts":<ns>,"bid":..,"ask":..,"strike":..,"is_call":true,"expiry_iso":"2026-06-17","tte_years":..}
+  {"t":"hb","ts":<ns>,"n_fut":<int>,"n_lo":<int>,"fronts":{"CL":"CLN6",...}}
 
 Connection model:
-  - We listen, the Rust client connects. Single-client server (latest wins).
-  - Buffered queue per client; on slow consumer we drop oldest (>4096 events).
+  - We listen, the stream client connects. Single-client server (latest wins).
+  - Buffered queue; on slow consumer we drop oldest (>8192 events).
   - SIGINT shuts the Databento Live stream and TCP server cleanly.
 """
 from __future__ import annotations
@@ -46,6 +49,43 @@ def log(msg: str) -> None:
     sys.stderr.flush()
 
 
+# -------------------- Product definitions --------------------
+# Each product maps a CME futures root + options root onto the shared signal
+# pipeline. `strike_step` is the option strike spacing; `strike_mult` encodes the
+# strike into the Databento raw_symbol (CL: "LON6 C8700" = 87.00 → strike*100).
+# `px_lo/px_hi` sanity-bound the forward proxy. `opt_exp_day` approximates the
+# option expiry as that day of the month PRECEDING the contract month (exact day
+# is not needed for the RR *sign* — IVs at the same expiry, tte errors cancel).
+PRODUCTS: list[dict] = [
+    {
+        "prod": "CL", "fut_root": "CL.FUT", "opt_root": "LO",
+        "strike_step": 0.5, "strike_mult": 100, "px_lo": 40, "px_hi": 200,
+        "opt_exp_day": 17,
+    },
+    {
+        # OG raw_symbol encodes the strike as a plain integer dollar value:
+        # "OGZ6 C4130" = $4130 (verified via GLBX definition). strike_mult=1.
+        "prod": "GOLD", "fut_root": "GC.FUT", "opt_root": "OG",
+        "strike_step": 10.0, "strike_mult": 1, "px_lo": 800, "px_hi": 6000,
+        "opt_exp_day": 24,
+    },
+    {
+        "prod": "SILVER", "fut_root": "SI.FUT", "opt_root": "SO",
+        "strike_step": 0.5, "strike_mult": 100, "px_lo": 5, "px_hi": 100,
+        "opt_exp_day": 25,
+    },
+]
+
+# How many front outright futures to subscribe per product, and how many front
+# option expiries to construct. Taking several (not just front+next) means the
+# actively-traded contract is always included even when the nearest month is a
+# thin serial in delivery — e.g. COMEX silver on 2026-07-02 rolls Jul(N)→Sep(U),
+# skipping the Aug(Q) serial, so front-by-expiration (N,Q) would miss the live U.
+# The live loop locks onto whichever subscribed contract actually quotes.
+FUT_DEPTH = int(os.environ.get("FUT_DEPTH", "4"))
+OPT_EXP_DEPTH = int(os.environ.get("OPT_EXP_DEPTH", "3"))
+
+
 # -------------------- Universe resolution --------------------
 
 def _prev_trading_day() -> date:
@@ -59,20 +99,21 @@ _MONTH_CODE = {"F": 1, "G": 2, "H": 3, "J": 4, "K": 5, "M": 6,
                "N": 7, "Q": 8, "U": 9, "V": 10, "X": 11, "Z": 12}
 
 
-def _opt_expiry_code(fut_sym: str) -> str:
-    """CL future raw symbol -> LO option expiry code. 'CLN6' -> 'N6'."""
-    return fut_sym[2:] if fut_sym.upper().startswith("CL") else fut_sym
+def _opt_expiry_code(fut_sym: str, fut_root: str) -> str:
+    """Front future raw symbol -> option expiry code, e.g. 'CLN6'->'N6', 'GCZ6'->'Z6'.
 
-
-def _approx_lo_expiry(exp_code: str, ref: datetime) -> datetime:
-    """Approximate the LO option expiration for a <monthletter><yeardigits> code.
-
-    Exact expiry isn't needed for the skew SIGN (RR25 is a difference of IVs at
-    the same expiry, so small tte errors largely cancel). CME WTI options
-    terminate ~3 business days before the underlying future, which terminates
-    ~3bd before the 25th of the month PRECEDING the contract month — i.e. roughly
-    mid-month of the prior month. We approximate as the 17th of that prior month.
+    The root is the 2-letter product code (CL/GC/SI); strip it to get <MonthYear>.
     """
+    root2 = fut_root[:2].upper()
+    return fut_sym[len(root2):] if fut_sym.upper().startswith(root2) else fut_sym
+
+
+def _approx_opt_expiry(exp_code: str, ref: datetime, exp_day: int) -> datetime:
+    """Approximate an option expiration for a <monthletter><yeardigits> code as
+    `exp_day` of the month PRECEDING the contract month (CME energy/metals options
+    terminate a few business days before the underlying, which is in the prior
+    month). Only used for tte; RR is a same-expiry IV difference so small errors
+    largely cancel."""
     m = _MONTH_CODE.get(exp_code[:1].upper())
     ydigits = exp_code[1:]
     if m is None or not ydigits.isdigit():
@@ -85,175 +126,134 @@ def _approx_lo_expiry(exp_code: str, ref: datetime) -> datetime:
     em = m - 1 if m > 1 else 12
     ey = year if m > 1 else year - 1
     try:
-        return datetime(ey, em, 17, 19, 30, tzinfo=timezone.utc)
+        return datetime(ey, em, exp_day, 19, 30, tzinfo=timezone.utc)
     except ValueError:
-        return datetime(ey, em, 17, tzinfo=timezone.utc)
+        return datetime(ey, em, exp_day, tzinfo=timezone.utc)
 
 
-def resolve_universe(api_key: str, strikes_window: int = 20) -> tuple[str, str, list[str], dict[str, dict]]:
-    """Resolve the front CL future and LO option subset to subscribe to.
-
-    Returns (front_fut_sym, list_of_lo_symbols, lo_meta_dict)
-    where lo_meta_dict[raw_symbol] = {strike, is_call, expiry_iso, tte_years}
-    """
-    hist = db.Historical(key=api_key)
-    day = _prev_trading_day()
+def _forward_proxy(hist: "db.Historical", probe_syms: list[str], day: date,
+                   px_lo: float, px_hi: float) -> float | None:
+    """Resolve a forward proxy for a product from (1) settle stat_type=3, then
+    (2) most-recent futures bbo-1m mid. Returns None if both fail."""
     start = day.isoformat()
     end = (day + timedelta(days=1)).isoformat()
-
-    log(f"resolving CL.FUT + LO.OPT for {start}")
-
-    # 1) CL futures - pick front outright
-    cl_def = hist.timeseries.get_range(
-        dataset="GLBX.MDP3",
-        schema="definition",
-        symbols=["CL.FUT"],
-        stype_in="parent",
-        start=start,
-        end=end,
-    ).to_df()
-    cl_fut = cl_def[cl_def["instrument_class"] == "F"].sort_values("expiration")
-    if len(cl_fut) == 0:
-        raise RuntimeError("no CL futures resolved")
-    # Subscribe to FRONT + NEXT month to survive the roll period (front-month
-    # expiry week). Sidecar's apply() locks `front_fut_sym` to whichever
-    # contract delivers BBOs first — so the active contract wins regardless of
-    # which is technically "front" by expiration date.
-    front_fut_sym = str(cl_fut.iloc[0]["raw_symbol"])
-    next_fut_sym = str(cl_fut.iloc[1]["raw_symbol"]) if len(cl_fut) > 1 else front_fut_sym
-    front_settle = float(cl_fut.iloc[0].get("min_price_increment", 0) or 0)
-    log(f"front CL future: {front_fut_sym} (also subscribing to {next_fut_sym} as roll fallback)")
-
-    # 2) LO option chain. The historical `LO.OPT` PARENT definition pull
-    # consistently 504s at Databento's gateway — the crude options parent is too
-    # large to resolve within their ~60s server timeout (futures resolve fine).
-    # Instead we CONSTRUCT a narrow ATM strike window directly and subscribe to
-    # those raw_symbols on the live feed (validated: ~160 symbols all return
-    # clean two-sided BBOs, no parent resolution needed). The forward proxy F
-    # below is derived purely from CL futures, so we never hit the options
-    # definition endpoint at all. Symbol construction happens after F is known.
-
-    # Forward proxy: prefer settle stat_type=3; if missing, use the most recent
-    # CL futures BBO mid from bbo-1m (this is the *live* forward, not a stale
-    # historical median). The median-of-strikes fallback is last-resort only
-    # because it returns the historical center of the chain, which can be
-    # tens of dollars away from the live forward and breaks Δ=-0.25 IV interp.
-    F_proxy: float | None = None
-
-    # Probe order: try the next-month contract FIRST, then front. Reason: in
-    # the roll window the front (e.g. CLM6) can have already expired and have
-    # no recent quotes, while CLN6 is the actively-trading contract. The live
-    # loop also auto-locks onto whichever delivers first, so we want our F
-    # proxy to match that contract.
-    probe_syms = list(dict.fromkeys([next_fut_sym, front_fut_sym]))
-
-    # 1) Try statistics schema (settlement) for each candidate
+    # 1) statistics settlement
     for psym in probe_syms:
-        if F_proxy is not None:
-            break
         try:
             st = hist.timeseries.get_range(
-                dataset="GLBX.MDP3",
-                schema="statistics",
-                symbols=[psym],
-                stype_in="raw_symbol",
-                start=start,
-                end=end,
+                dataset="GLBX.MDP3", schema="statistics", symbols=[psym],
+                stype_in="raw_symbol", start=start, end=end,
             ).to_df()
             st = st[st["stat_type"] == 3]
             if len(st):
                 v = float(st.iloc[-1]["price"])
                 if v > 1e6:
                     v /= 1e9
-                if 50 < v < 200:
-                    F_proxy = v
-                    log(f"forward proxy F = {F_proxy:.2f} (from {psym} settle stat_type=3)")
+                if px_lo < v < px_hi:
+                    log(f"forward proxy F = {v:.2f} (from {psym} settle stat_type=3)")
+                    return v
         except Exception as e:
             log(f"settle stat fetch failed for {psym}: {e}")
-
-    # 2) Better fallback: most recent CL futures BBO mid (live forward).
-    # Widen the lookback window to 5 days to ride out long weekends / quiet
-    # sessions in the previous trading day.
+    # 2) bbo-1m mid (live-ish forward), widen lookback to ride out quiet sessions
     bbo_start = (day - timedelta(days=5)).isoformat()
     bbo_end = (day + timedelta(days=1)).isoformat()
-    if F_proxy is None:
-        for psym in probe_syms:
-            if F_proxy is not None:
-                break
-            try:
-                cl_bbo = hist.timeseries.get_range(
-                    dataset="GLBX.MDP3",
-                    schema="bbo-1m",
-                    symbols=[psym],
-                    stype_in="raw_symbol",
-                    start=bbo_start,
-                    end=bbo_end,
-                ).to_df()
-                if not len(cl_bbo):
-                    log(f"bbo-1m: no data for {psym} in {bbo_start}..{bbo_end}")
-                    continue
-                # Discover column names — databento bbo-1m typically uses
-                # bid_px_00 / ask_px_00, but historical schemas have shipped
-                # bid_px / ask_px in older versions. Probe and adapt.
-                cols = set(cl_bbo.columns)
-                bid_col = next((c for c in ("bid_px_00", "bid_px", "bid_px_01") if c in cols), None)
-                ask_col = next((c for c in ("ask_px_00", "ask_px", "ask_px_01") if c in cols), None)
-                log(f"bbo-1m[{psym}] columns: bid={bid_col}, ask={ask_col} (rows={len(cl_bbo)})")
-                if not (bid_col and ask_col):
-                    continue
-                # Walk from most recent backwards to find a valid two-sided quote
-                for i in range(len(cl_bbo) - 1, -1, -1):
-                    row = cl_bbo.iloc[i]
-                    bid = float(row.get(bid_col, 0) or 0)
-                    ask = float(row.get(ask_col, 0) or 0)
-                    if bid > 1e6:
-                        bid /= 1e9
-                    if ask > 1e6:
-                        ask /= 1e9
-                    if bid > 0 and ask > 0 and 50 < (bid + ask) / 2 < 200:
-                        F_proxy = (bid + ask) / 2
-                        log(f"forward proxy F = {F_proxy:.2f} (from {psym} bbo-1m mid, row -{len(cl_bbo)-i})")
-                        break
-            except Exception as e:
-                log(f"bbo-1m fallback failed for {psym}: {e}")
+    for psym in probe_syms:
+        try:
+            cl_bbo = hist.timeseries.get_range(
+                dataset="GLBX.MDP3", schema="bbo-1m", symbols=[psym],
+                stype_in="raw_symbol", start=bbo_start, end=bbo_end,
+            ).to_df()
+            if not len(cl_bbo):
+                continue
+            cols = set(cl_bbo.columns)
+            bid_col = next((c for c in ("bid_px_00", "bid_px", "bid_px_01") if c in cols), None)
+            ask_col = next((c for c in ("ask_px_00", "ask_px", "ask_px_01") if c in cols), None)
+            if not (bid_col and ask_col):
+                continue
+            for i in range(len(cl_bbo) - 1, -1, -1):
+                row = cl_bbo.iloc[i]
+                bid = float(row.get(bid_col, 0) or 0)
+                ask = float(row.get(ask_col, 0) or 0)
+                if bid > 1e6:
+                    bid /= 1e9
+                if ask > 1e6:
+                    ask /= 1e9
+                if bid > 0 and ask > 0 and px_lo < (bid + ask) / 2 < px_hi:
+                    F = (bid + ask) / 2
+                    log(f"forward proxy F = {F:.2f} (from {psym} bbo-1m mid, row -{len(cl_bbo)-i})")
+                    return F
+        except Exception as e:
+            log(f"bbo-1m fallback failed for {psym}: {e}")
+    return None
 
-    # 3) Last-resort: fixed sane crude level (futures probes failed). The live
-    # futures BBO will refine ATM in practice; this only seeds strike selection.
-    if F_proxy is None or not (50 < F_proxy < 200):
-        F_proxy = 85.0
-        log(f"forward proxy F = {F_proxy:.2f} (LAST RESORT default; CL futures probes failed)")
 
-    # Construct the narrow ATM chain: front 2 option expiries (from the front/
-    # next CL future month codes, e.g. CLN6 -> LON6) x (ATM +/- strikes_window)
-    # at $0.50 steps x {Call, Put}. Raw symbol format (validated against the live
-    # feed): "LO<MonthYear> <C|P><strike*100>", e.g. "LON6 C8700" = $87.00 call.
+def resolve_product(hist: "db.Historical", p: dict, day: date, strikes_window: int):
+    """Resolve one product's front FUT_DEPTH futures and ATM ± window option
+    symbols across the front OPT_EXP_DEPTH expiries.
+
+    Returns (fut_list, lo_symbols, lo_meta) where fut_list is the front futures'
+    raw symbols (nearest first) and lo_meta[raw_symbol] =
+    {prod, strike, is_call, expiry_iso, tte_years}.
+    Raises on hard failure (no futures resolved)."""
+    prod = p["prod"]
+    start = day.isoformat()
+    end = (day + timedelta(days=1)).isoformat()
+    log(f"[{prod}] resolving {p['fut_root']} + {p['opt_root']}.OPT for {start}")
+
+    # 1) futures front/next outright from the definition parent (this endpoint
+    #    resolves reliably for futures; the OPTIONS parent 504s → we construct).
+    cl_def = hist.timeseries.get_range(
+        dataset="GLBX.MDP3", schema="definition", symbols=[p["fut_root"]],
+        stype_in="parent", start=start, end=end,
+    ).to_df()
+    cl_fut = cl_def[cl_def["instrument_class"] == "F"].sort_values("expiration")
+    if len(cl_fut) == 0:
+        raise RuntimeError(f"[{prod}] no futures resolved for {p['fut_root']}")
+    n_fut = min(max(2, FUT_DEPTH), len(cl_fut))
+    fut_list = [str(cl_fut.iloc[i]["raw_symbol"]) for i in range(n_fut)]
+    log(f"[{prod}] front futures (by expiry): {fut_list}")
+
+    # 2) forward proxy — probe across the front futures; the first in-band value
+    #    wins (a thin serial may have a stale/absent settle). Options recenter via
+    #    put-call parity downstream, so this only needs to seed strike placement.
+    F = _forward_proxy(hist, fut_list, day, p["px_lo"], p["px_hi"])
+    if F is None or not (p["px_lo"] < F < p["px_hi"]):
+        F = (p["px_lo"] + p["px_hi"]) / 2 if F is None else F
+        # last-resort seed; live futures BBO refines ATM in practice
+        log(f"[{prod}] forward proxy F = {F:.2f} (LAST RESORT default; futures probes failed)")
+
+    # 3) construct the ATM ± window option chain at the product's strike spacing.
+    #    Raw symbol format (validated for CL): "<optroot><MonthYear> <C|P><strike*mult>".
     now = datetime.now(timezone.utc)
-    opt_exps = list(dict.fromkeys([_opt_expiry_code(front_fut_sym), _opt_expiry_code(next_fut_sym)]))
-    step = 0.5
-    base = round(F_proxy / step) * step
+    opt_exps = list(dict.fromkeys(
+        _opt_expiry_code(s, p["fut_root"]) for s in fut_list
+    ))[:OPT_EXP_DEPTH]
+    step = float(p["strike_step"])
+    mult = int(p["strike_mult"])
+    base = round(F / step) * step
     lo_symbols: list[str] = []
     lo_meta: dict[str, dict] = {}
     for exp_code in opt_exps:
-        exp_dt = _approx_lo_expiry(exp_code, now)
+        exp_dt = _approx_opt_expiry(exp_code, now, int(p["opt_exp_day"]))
         tte = max(1e-6, (exp_dt - now).total_seconds() / (365.25 * 86400))
         for k in range(-strikes_window, strikes_window + 1):
             strike = base + k * step
             if strike <= 0:
                 continue
-            code = f"{int(round(strike * 100))}"
+            code = f"{int(round(strike * mult))}"
             for cp, is_call in (("C", True), ("P", False)):
-                sym = f"LO{exp_code} {cp}{code}"
+                sym = f"{p['opt_root']}{exp_code} {cp}{code}"
                 lo_symbols.append(sym)
                 lo_meta[sym] = {
+                    "prod": prod,
                     "strike": float(strike),
                     "is_call": is_call,
                     "expiry_iso": exp_dt.date().isoformat(),
                     "tte_years": tte,
                 }
-
-    log(f"constructed {len(lo_symbols)} LO symbols across expiries {opt_exps} "
-        f"(ATM={base:.2f}, +/-{strikes_window} x $0.50, C+P) -- no parent definition pull")
-    return front_fut_sym, next_fut_sym, lo_symbols, lo_meta
+    log(f"[{prod}] constructed {len(lo_symbols)} option symbols across {opt_exps} "
+        f"(ATM={base:.2f}, +/-{strikes_window} x {step}, C+P)")
+    return fut_list, lo_symbols, lo_meta
 
 
 # -------------------- Wire helpers --------------------
@@ -277,7 +277,9 @@ class Hub:
         self.client_writer: asyncio.StreamWriter | None = None
         self.n_fut_evts = 0
         self.n_lo_evts = 0
-        self.front_fut_sym = ""
+        self.fronts: dict[str, str] = {}  # prod -> active future raw symbol (emitted)
+        self.front_ts: dict[str, int] = {}  # prod -> wall-clock ns of active contract's last BBO
+        self.fut_counts: dict[str, dict[str, int]] = {}  # prod -> {sym: BBO count} (liquidity)
 
     def emit(self, ev: dict) -> None:
         line = (json.dumps(ev, separators=(",", ":")) + "\n").encode("utf-8")
@@ -320,7 +322,7 @@ async def heartbeat(hub: Hub, every_ms: int = 1000) -> None:
             "ts": time.time_ns(),
             "n_fut": hub.n_fut_evts,
             "n_lo": hub.n_lo_evts,
-            "front_fut": hub.front_fut_sym,
+            "fronts": dict(hub.fronts),
         })
 
 
@@ -328,7 +330,6 @@ async def serve(hub: Hub, host: str, port: int) -> None:
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         peer = writer.get_extra_info("peername")
         log(f"client connected: {peer}")
-        # Latest-wins: replace previous writer if any
         if hub.client_writer is not None:
             try:
                 hub.client_writer.close()
@@ -360,14 +361,15 @@ async def serve(hub: Hub, host: str, port: int) -> None:
 
 # -------------------- Databento Live ingest --------------------
 
-def run_live(hub: Hub, api_key: str, front_fut: str, next_fut: str, lo_symbols: list[str], lo_meta: dict[str, dict], loop: asyncio.AbstractEventLoop) -> None:
-    """Auto-reconnecting wrapper. The Databento Live session can drop (e.g.
-    'Slow client detected', or the weekend CME close); when it does we wait with
-    backoff and re-establish the subscription instead of dying permanently."""
+def run_live(hub: Hub, api_key: str, fut_syms: dict[str, str], lo_meta: dict[str, dict],
+             all_fut: list[str], all_lo: list[str], prod_by_sym: dict[str, str],
+             loop: asyncio.AbstractEventLoop) -> None:
+    """Auto-reconnecting wrapper. Rebuilds the full multi-product subscription on
+    every (re)connect so a transient drop can't leave us wedged."""
     backoff = 2
     while True:
         try:
-            _run_live_once(hub, api_key, front_fut, next_fut, lo_symbols, lo_meta, loop)
+            _run_live_once(hub, api_key, fut_syms, lo_meta, all_fut, all_lo, prod_by_sym, loop)
         except Exception as e:
             log(f"run_live wrapper caught: {e}")
         log(f"live stream down; reconnecting in {backoff}s")
@@ -375,46 +377,29 @@ def run_live(hub: Hub, api_key: str, front_fut: str, next_fut: str, lo_symbols: 
         backoff = min(backoff * 2, 30)
 
 
-def _run_live_once(hub: Hub, api_key: str, front_fut: str, next_fut: str, lo_symbols: list[str], lo_meta: dict[str, dict], loop: asyncio.AbstractEventLoop) -> None:
-    """Blocking: pulls from databento.Live and emits events into the hub until
-    the stream errors or ends (then the wrapper reconnects)."""
+def _run_live_once(hub: Hub, api_key: str, fut_syms: dict[str, str], lo_meta: dict[str, dict],
+                   all_fut: list[str], all_lo: list[str], prod_by_sym: dict[str, str],
+                   loop: asyncio.AbstractEventLoop) -> None:
+    """Blocking: pulls from databento.Live and emits tagged events until the
+    stream errors or ends (then the wrapper reconnects)."""
     live = db.Live(key=api_key)
 
-    # CL futures: mbp-1 + trades for FRONT + NEXT contract (roll-period coverage).
-    # `fut_syms` set is used downstream to accept BBOs for either.
-    fut_syms = {front_fut, next_fut}
-    live.subscribe(
-        dataset="GLBX.MDP3",
-        schema="mbp-1",
-        stype_in="raw_symbol",
-        symbols=list(fut_syms),
-    )
-    live.subscribe(
-        dataset="GLBX.MDP3",
-        schema="trades",
-        stype_in="raw_symbol",
-        symbols=list(fut_syms),
-    )
-    # NOTE: mbp-10 (depth) is NOT subscribed — the GLBX entitlement on this key
-    # is mbp-1/trades/definition/statistics only ("Not authorized for mbp-10").
-    # Book imbalance is derived downstream from the mbp-1 top-of-book bid_sz/ask_sz.
-    # LO chain: mbp-1 only (no need for trades on options for VOLGUARD v1)
-    # Subscribe in chunks of 100 to avoid hitting any per-subscribe symbol cap.
+    # Futures: mbp-1 + trades for every product's FRONT + NEXT contract.
+    fut_set = list(dict.fromkeys(all_fut))
+    live.subscribe(dataset="GLBX.MDP3", schema="mbp-1", stype_in="raw_symbol", symbols=fut_set)
+    live.subscribe(dataset="GLBX.MDP3", schema="trades", stype_in="raw_symbol", symbols=fut_set)
+    # NOTE: mbp-10 (depth) is NOT entitled on this key ("Not authorized for mbp-10").
+    # Book imbalance is derived downstream from mbp-1 top-of-book bid_sz/ask_sz.
+    # Options: mbp-1 only, subscribe in chunks of 100 to stay under any per-call cap.
     chunk = 100
-    for i in range(0, len(lo_symbols), chunk):
-        live.subscribe(
-            dataset="GLBX.MDP3",
-            schema="mbp-1",
-            stype_in="raw_symbol",
-            symbols=lo_symbols[i:i + chunk],
-        )
+    for i in range(0, len(all_lo), chunk):
+        live.subscribe(dataset="GLBX.MDP3", schema="mbp-1", stype_in="raw_symbol",
+                       symbols=all_lo[i:i + chunk])
 
-    # Note: databento.Live auto-starts on iteration; calling start() before
-    # iterating raises "Cannot start iteration after streaming has started".
-    log(f"connected to GLBX.MDP3; streaming {1 + len(lo_symbols)} symbols")
+    log(f"connected to GLBX.MDP3; streaming {len(fut_set)} futures + {len(all_lo)} options")
 
-    # Build a fast symbol-id -> meta lookup. databento records carry
-    # instrument_id (int); symbology mapping comes via SymbolMappingMsg.
+    # fast raw_symbol set for the futures of each product (for the front-lock check)
+    fut_prod = {s: prod_by_sym.get(s, "") for s in fut_set}
     sym_by_id: dict[int, str] = {}
 
     def push(ev: dict) -> None:
@@ -424,23 +409,19 @@ def _run_live_once(hub: Hub, api_key: str, front_fut: str, next_fut: str, lo_sym
     try:
         for rec in live:
             cls = type(rec).__name__
-            # Symbol mapping
             if cls == "SymbolMappingMsg":
                 try:
                     sym_by_id[int(rec.instrument_id)] = str(rec.stype_out_symbol)
                 except Exception:
                     pass
                 continue
-            # Heartbeat / system messages
             if cls in ("SystemMsg", "ErrorMsg"):
                 continue
-            # MBP-1 BBO
             if cls in ("MBP1Msg", "Mbp1Msg"):
                 iid = int(getattr(rec, "instrument_id", 0))
                 sym = sym_by_id.get(iid, "")
                 if not sym:
                     continue
-                # levels[0] is the top
                 try:
                     lv = rec.levels[0]
                     bid = _scale_px(lv.bid_px)
@@ -452,48 +433,52 @@ def _run_live_once(hub: Hub, api_key: str, front_fut: str, next_fut: str, lo_sym
                 if bid <= 0 or ask <= 0:
                     continue
                 ts_ns = int(getattr(rec, "ts_event", 0)) or time.time_ns()
-                if sym in fut_syms:
-                    # Lock onto whichever futures sym delivers BBOs first; from
-                    # then on, only emit that one to the bot (avoids confusing
-                    # the bot's `front_fut_sym` auto-detect with two symbols).
-                    if not hub.front_fut_sym:
-                        hub.front_fut_sym = sym
-                        log(f"locked active CL future: {sym}")
-                    if sym != hub.front_fut_sym:
-                        continue
+                if sym in fut_prod:
+                    prod = fut_prod[sym]
+                    # Emit ONE contract per product — the most actively-quoting one.
+                    # We subscribe the front few outrights (some may be thin serials
+                    # or a front-month in delivery); pick the active contract by BBO
+                    # count so we track the liquid month (e.g. silver Sep not the Aug
+                    # serial), with hysteresis to avoid flapping and a staleness
+                    # failover so a dying contract hands off immediately.
+                    wall = time.time_ns()
+                    counts = hub.fut_counts.setdefault(prod, {})
+                    counts[sym] = counts.get(sym, 0) + 1
+                    active = hub.fronts.get(prod)
+                    if active is None:
+                        hub.fronts[prod] = active = sym
+                        hub.front_ts[prod] = wall
+                        log(f"[{prod}] active future: {sym}")
+                    elif sym != active:
+                        stale = wall - hub.front_ts.get(prod, 0) > 6_000_000_000
+                        if stale or counts[sym] > counts.get(active, 0) + 8:
+                            hub.fronts[prod] = active = sym
+                            hub.front_ts[prod] = wall
+                            log(f"[{prod}] switched active future -> {sym}"
+                                f"{' (previous went quiet)' if stale else ' (more liquid)'}")
+                        else:
+                            continue
+                    else:
+                        hub.front_ts[prod] = wall
                     hub.n_fut_evts += 1
-                    push({
-                        "t": "bbo",
-                        "sym": sym,
-                        "ts": ts_ns,
-                        "bid": bid,
-                        "ask": ask,
-                        "bid_sz": bid_sz,
-                        "ask_sz": ask_sz,
-                    })
+                    push({"t": "bbo", "prod": prod, "sym": sym, "ts": ts_ns,
+                          "bid": bid, "ask": ask, "bid_sz": bid_sz, "ask_sz": ask_sz})
                 else:
                     meta = lo_meta.get(sym)
                     if meta is None:
                         continue
                     hub.n_lo_evts += 1
-                    push({
-                        "t": "lo_bbo",
-                        "sym": sym,
-                        "ts": ts_ns,
-                        "bid": bid,
-                        "ask": ask,
-                        "strike": meta["strike"],
-                        "is_call": meta["is_call"],
-                        "expiry_iso": meta["expiry_iso"],
-                        "tte_years": meta["tte_years"],
-                    })
+                    push({"t": "lo_bbo", "prod": meta["prod"], "sym": sym, "ts": ts_ns,
+                          "bid": bid, "ask": ask, "strike": meta["strike"],
+                          "is_call": meta["is_call"], "expiry_iso": meta["expiry_iso"],
+                          "tte_years": meta["tte_years"]})
                 continue
-            # Trades
             if cls in ("TradeMsg",):
                 iid = int(getattr(rec, "instrument_id", 0))
                 sym = sym_by_id.get(iid, "")
-                # Only emit trades for the locked active futures sym
-                if not hub.front_fut_sym or sym != hub.front_fut_sym:
+                prod = fut_prod.get(sym, "")
+                # Only emit trades for a product's locked active future.
+                if not prod or hub.fronts.get(prod) != sym:
                     continue
                 try:
                     px = _scale_px(rec.price)
@@ -503,11 +488,11 @@ def _run_live_once(hub: Hub, api_key: str, front_fut: str, next_fut: str, lo_sym
                     continue
                 if px <= 0 or sz <= 0:
                     continue
-                # Databento side: 'B'=buy aggressor, 'A'=sell aggressor, 'N'=none
                 side = "B" if side_raw == "B" else ("A" if side_raw == "A" else "N")
                 ts_ns = int(getattr(rec, "ts_event", 0)) or time.time_ns()
                 hub.n_fut_evts += 1
-                push({"t": "trade", "sym": sym, "ts": ts_ns, "px": px, "sz": sz, "side": side})
+                push({"t": "trade", "prod": prod, "sym": sym, "ts": ts_ns,
+                      "px": px, "sz": sz, "side": side})
                 continue
     except Exception as e:
         log(f"live loop error: {e}")
@@ -525,14 +510,10 @@ async def amain() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default=os.environ.get("SIDECAR_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("SIDECAR_PORT", "5051")))
-    # ATM ± N strikes per expiry. CL options have 0.5$ strike spacing, so 40 ⇒
-    # F ± $20 of coverage. This is robust to a couple weeks of forward drift
-    # without re-resolving the chain. Previous default (20 ⇒ F ± $10) caused
-    # the chain to go one-sided when the forward drifted >$10 from startup F
-    # — observed 2026-05-25: sidecar resolved at F=98.26 on 05-21, F dropped
-    # to 91.23 by 05-25, 25Δ put (~K=84) was outside the subscribed range,
-    # dRR_30m returned None for >24h. See reviews/sidecar_chain_bug_fix.md.
-    parser.add_argument("--strikes-window", type=int, default=40)
+    # ATM ± N strikes per expiry, at each product's strike spacing. 40 gives wide
+    # coverage that survives a couple weeks of forward drift without re-resolving.
+    parser.add_argument("--strikes-window", type=int,
+                        default=int(os.environ.get("STRIKES_WINDOW", "40")))
     args = parser.parse_args()
 
     load_dotenv()
@@ -541,26 +522,49 @@ async def amain() -> int:
         log("ERROR: DATABENTO_API_KEY not set; aborting")
         return 1
 
-    front_fut, next_fut, lo_syms, lo_meta = resolve_universe(api_key, strikes_window=args.strikes_window)
+    # Which products to stream (default all). PRODS env = comma-sep prod codes.
+    want = {s.strip().upper() for s in os.environ.get("PRODS", "").split(",") if s.strip()}
+    products = [p for p in PRODUCTS if not want or p["prod"] in want]
+
+    hist = db.Historical(key=api_key)
+    day = _prev_trading_day()
+
+    fut_syms: dict[str, str] = {}   # prod -> front (informational)
+    lo_meta: dict[str, dict] = {}   # option raw_symbol -> meta (incl prod)
+    all_fut: list[str] = []
+    all_lo: list[str] = []
+    prod_by_sym: dict[str, str] = {}
+    for p in products:
+        try:
+            futs, lo_syms, meta = resolve_product(hist, p, day, args.strikes_window)
+        except Exception as e:
+            log(f"[{p['prod']}] resolve FAILED, skipping: {e}")
+            continue
+        fut_syms[p["prod"]] = futs[0]
+        for s in futs:
+            if s not in prod_by_sym:
+                prod_by_sym[s] = p["prod"]
+                all_fut.append(s)
+        all_lo.extend(lo_syms)
+        lo_meta.update(meta)
+
+    if not all_fut:
+        log("ERROR: no products resolved; aborting")
+        return 1
+    log(f"resolved {len(fut_syms)} products: {list(fut_syms.keys())}; "
+        f"{len(all_fut)} futures + {len(all_lo)} options total")
 
     hub = Hub()
-    # Don't pre-fill front_fut_sym; let the live loop lock onto the first
-    # futures sym that actually delivers BBOs (handles roll period).
-    hub.front_fut_sym = ""
-
     loop = asyncio.get_running_loop()
 
-    # Run databento.Live consumer in a thread
     import threading
     th = threading.Thread(
         target=run_live,
-        args=(hub, api_key, front_fut, next_fut, lo_syms, lo_meta, loop),
-        name="databento-live",
-        daemon=True,
+        args=(hub, api_key, fut_syms, lo_meta, all_fut, all_lo, prod_by_sym, loop),
+        name="databento-live", daemon=True,
     )
     th.start()
 
-    # Graceful shutdown
     stop_evt = asyncio.Event()
 
     def _sig(*_a):
@@ -571,7 +575,6 @@ async def amain() -> int:
         try:
             loop.add_signal_handler(s, _sig)
         except (NotImplementedError, RuntimeError):
-            # Windows: signal handlers limited; rely on KeyboardInterrupt
             pass
 
     server_task = asyncio.create_task(serve(hub, args.host, args.port))
@@ -590,7 +593,6 @@ async def amain() -> int:
                 await t
             except Exception:
                 pass
-
     return 0
 
 

@@ -2,23 +2,20 @@
  * SidecarSource — reads the Databento sidecar's NDJSON TCP stream and turns it
  * into AlphaSnapshots. This is the only data source in this repo.
  *
- * Sidecar events consumed:
- *   {"t":"bbo","sym":"CLN6","bid","ask",...}                    ← CL front future top-of-book
- *   {"t":"lo_bbo","sym":"LON6 C8700","bid","ask","strike","is_call","expiry_iso","tte_years"}
- *   {"t":"trade","sym":"CLN6","px","sz","side":"B"|"A"|"N"}      ← CL futures trades
- *   {"t":"imb","sym":"CLN6","imb"}                              ← top-5 book imbalance
+ * MULTI-PRODUCT: the sidecar now streams several CME products (CL/GOLD/SILVER)
+ * in one Databento Live session. Every event carries a `prod` tag; we keep an
+ * independent ProductState per product and compute the same Black-76 signal set
+ * for each, then emit one AlphaSnapshot per catalog symbol.
+ *
+ * Sidecar events consumed (all carry `prod`, e.g. "CL"|"GOLD"|"SILVER"):
+ *   {"t":"bbo","prod":"GOLD","sym":"GCZ6","bid","ask","bid_sz","ask_sz"}      ← front future top-of-book
+ *   {"t":"lo_bbo","prod":"GOLD","sym":"OGZ6 C300000","bid","ask","strike","is_call","expiry_iso","tte_years"}
+ *   {"t":"trade","prod":"GOLD","sym":"GCZ6","px","sz","side":"B"|"A"|"N"}      ← futures trades
  *   {"t":"hb",...}
  *
- * Derived signals published (Black-76, r≈0):
- *   cme_fwd_mid     futures mid (live forward)
- *   atm_iv          ATM implied vol (front expiry, interpolated at K=F)
- *   rr25            25Δ risk reversal = IV(25Δ put) − IV(25Δ call)  [vol pts]
- *   skew_signal     EWMA(−rr25 / scale) in [-1,1]  (>0 bullish, <0 bearish)
- *   rr25_d4h        change in rr25 over the trailing window (skew velocity proxy)
- *   iv_term_slope   ATM IV(next expiry) − ATM IV(front expiry)
- *   signed_flow_10  signed CME futures volume over a trailing 10s window
- *   imb_5           top-5 book depth imbalance in [-1,1]
- *   funding         Hyperliquid funding rate for the coin (polled)
+ * Derived signals published per product (Black-76, r≈0):
+ *   cme_fwd_mid, atm_iv, rr25, skew_signal, rr25_d4h, iv_term_slope,
+ *   signed_flow_10, imb_5, funding (HL funding for the mapped coin).
  * Still null (need open-interest pipeline): gex_put_wall, gex_call_wall, spot_vs_walls.
  */
 import net from 'net';
@@ -37,8 +34,24 @@ const RR_HIST_MS = Number(process.env.RR_HIST_MS ?? 1_800_000); // 30m trailing 
 const FUNDING_POLL_MS = Number(process.env.FUNDING_POLL_MS ?? 30_000);
 const HL_INFO = process.env.HL_INFO_URL ?? 'https://api.hyperliquid.xyz/info';
 
-// HL xyz-dex universe name per stream symbol (for the funding poll).
-const HL_UNIVERSE_NAME: Record<string, string> = { CL: 'xyz:CL', BRENT: 'xyz:BRENTOIL' };
+// Catalog symbol → sidecar product tag. Only symbols listed here get live data;
+// any other catalog symbol (e.g. BRENT, not yet fed) emits null/stale.
+const SYM_TO_PROD: Record<string, string> = { CL: 'CL', GOLD: 'GOLD', SILVER: 'SILVER' };
+
+// HL xyz-dex universe name per catalog symbol (for the funding poll).
+const HL_UNIVERSE_NAME: Record<string, string> = {
+  CL: 'xyz:CL',
+  BRENT: 'xyz:BRENTOIL',
+  GOLD: 'xyz:GOLD',
+  SILVER: 'xyz:SILVER',
+};
+
+// Per-product forward sanity band (reject settle/parity forwards outside it).
+const FWD_BAND: Record<string, [number, number]> = {
+  CL: [40, 200],
+  GOLD: [800, 6000],
+  SILVER: [5, 100],
+};
 
 function fv(v: number | null | undefined, ts: number): FieldValue {
   return { v: v == null || Number.isNaN(v) ? null : v, ts };
@@ -54,27 +67,39 @@ interface OptQuote {
   ts: number;
 }
 
+/** Independent live state for one CME product (futures + option chain + tape). */
+class ProductState {
+  futBid = 0;
+  futAsk = 0;
+  futBidSz = 0;
+  futAskSz = 0;
+  futAt = 0;
+  opts = new Map<string, OptQuote>(); // raw_symbol -> latest quote
+  trades: Array<{ t: number; signed: number }> = [];
+  smoothSkew = 0;
+  skewInit = false;
+  rrHist: Array<{ t: number; rr: number }> = [];
+}
+
 export class SidecarSource implements AlphaSource {
   private readonly handlers = new Set<(s: AlphaSnapshot) => void>();
   private readonly latestBySym = new Map<string, AlphaSnapshot>();
+  private readonly states = new Map<string, ProductState>(); // prod -> state
   private seq = 0;
   private sock: net.Socket | null = null;
   private buf = '';
   private timer: NodeJS.Timeout | null = null;
   private fundingTimer: NodeJS.Timeout | null = null;
-
-  // live state from the sidecar
-  private futBid = 0;
-  private futAsk = 0;
-  private futBidSz = 0;
-  private futAskSz = 0;
-  private futAt = 0;
-  private opts = new Map<string, OptQuote>(); // raw_symbol -> latest quote
-  private trades: Array<{ t: number; signed: number }> = [];
-  private smoothSkew = 0;
-  private skewInit = false;
-  private rrHist: Array<{ t: number; rr: number }> = [];
   private fundingByCoin = new Map<string, number>();
+
+  private state(prod: string): ProductState {
+    let s = this.states.get(prod);
+    if (!s) {
+      s = new ProductState();
+      this.states.set(prod, s);
+    }
+    return s;
+  }
 
   symbols(): string[] {
     return STREAM_SKILLS.map((s) => s.symbol);
@@ -128,19 +153,23 @@ export class SidecarSource implements AlphaSource {
       } catch {
         continue;
       }
+      // Route by product tag; default to CL for pre-multi-product sidecars.
+      const prod: string = e.prod ?? 'CL';
+      if (e.t === 'hb') continue;
+      const st = this.state(prod);
       switch (e.t) {
         case 'bbo':
           if (e.bid > 0 && e.ask > 0) {
-            this.futBid = e.bid;
-            this.futAsk = e.ask;
-            this.futBidSz = Number(e.bid_sz ?? 0);
-            this.futAskSz = Number(e.ask_sz ?? 0);
-            this.futAt = Date.now();
+            st.futBid = e.bid;
+            st.futAsk = e.ask;
+            st.futBidSz = Number(e.bid_sz ?? 0);
+            st.futAskSz = Number(e.ask_sz ?? 0);
+            st.futAt = Date.now();
           }
           break;
         case 'lo_bbo':
           if (e.bid > 0 && e.ask > 0)
-            this.opts.set(e.sym, {
+            st.opts.set(e.sym, {
               bid: e.bid,
               ask: e.ask,
               strike: e.strike,
@@ -152,7 +181,7 @@ export class SidecarSource implements AlphaSource {
           break;
         case 'trade': {
           const signed = e.side === 'B' ? e.sz : e.side === 'A' ? -e.sz : 0;
-          if (signed) this.trades.push({ t: Date.now(), signed });
+          if (signed) st.trades.push({ t: Date.now(), signed });
           break;
         }
       }
@@ -181,9 +210,9 @@ export class SidecarSource implements AlphaSource {
   }
 
   /** Fresh, reasonably-liquid option quotes (two-sided, tight enough to invert). */
-  private freshOpts(now: number): OptQuote[] {
+  private freshOpts(st: ProductState, now: number): OptQuote[] {
     const out: OptQuote[] = [];
-    for (const q of this.opts.values()) {
+    for (const q of st.opts.values()) {
       if (!(now - q.ts < STALE_MS && q.bid > 0 && q.ask > 0 && q.tte > 0)) continue;
       const rel = (q.ask - q.bid) / ((q.ask + q.bid) / 2);
       if (rel > MAX_REL_SPREAD) continue; // illiquid wing → unreliable IV, drop it
@@ -194,11 +223,14 @@ export class SidecarSource implements AlphaSource {
 
   /** Front/next expiry IV analytics from the option chain. */
   private optionAnalytics(
+    st: ProductState,
+    prod: string,
     F: number,
     now: number
   ): { atm_iv: number | null; rr25: number | null; iv_term_slope: number | null } {
-    const fresh = this.freshOpts(now);
+    const fresh = this.freshOpts(st, now);
     if (fresh.length < 6 || F <= 0) return { atm_iv: null, rr25: null, iv_term_slope: null };
+    const [lo, hi] = FWD_BAND[prod] ?? [1, 1e6];
 
     const byExp = new Map<string, OptQuote[]>();
     for (const q of fresh) {
@@ -211,9 +243,11 @@ export class SidecarSource implements AlphaSource {
     if (!exps.length) return { atm_iv: null, rr25: null, iv_term_slope: null };
 
     // Forward from put-call parity (front expiry): F_impl = K + (callMid − putMid),
-    // taken as the median over strikes near the futures mid where both sides
-    // quote. Using the *implied* forward (not the raw futures mid) removes the
-    // systematic call/put IV tilt that otherwise fabricates a huge risk reversal.
+    // median over strikes near the futures mid where both sides quote. Using the
+    // *implied* forward (not the raw futures mid) removes the systematic call/put
+    // IV tilt that otherwise fabricates a huge risk reversal. The near-K window
+    // scales with the product's strike spacing (≈ a few strikes wide).
+    const near = Math.max(6, F * 0.01);
     const parityFwd = (qs: OptQuote[]): number => {
       const byK = new Map<number, { c?: number; p?: number }>();
       for (const q of qs) {
@@ -224,11 +258,11 @@ export class SidecarSource implements AlphaSource {
       }
       const ests: number[] = [];
       for (const [K, e] of byK)
-        if (e.c != null && e.p != null && Math.abs(K - F) < 6) ests.push(K + e.c - e.p);
+        if (e.c != null && e.p != null && Math.abs(K - F) < near) ests.push(K + e.c - e.p);
       if (!ests.length) return F;
       ests.sort((a, b) => a - b);
       const med = ests[Math.floor(ests.length / 2)]!;
-      return med > 50 && med < 200 ? med : F;
+      return med > lo && med < hi ? med : F;
     };
     F = parityFwd(exps[0]!);
 
@@ -268,68 +302,80 @@ export class SidecarSource implements AlphaSource {
     return { atm_iv, rr25, iv_term_slope };
   }
 
-  private signedFlow(now: number): number {
+  private signedFlow(st: ProductState, now: number): number {
     const cut = now - FLOW_WINDOW_MS;
-    while (this.trades.length && this.trades[0]!.t < cut) this.trades.shift();
+    while (st.trades.length && st.trades[0]!.t < cut) st.trades.shift();
     let s = 0;
-    for (const t of this.trades) s += t.signed;
+    for (const t of st.trades) s += t.signed;
     return s;
   }
 
-  private emit(): void {
-    const ts = Date.now();
-    const futFresh = this.futBid > 0 && this.futAsk > 0 && ts - this.futAt < STALE_MS;
-    const mid = futFresh ? (this.futBid + this.futAsk) / 2 : null;
+  /** Compute the full field set for one product from its state (or all-null). */
+  private computeFields(prod: string | undefined, ts: number) {
+    if (!prod || !this.states.has(prod)) {
+      return { health: 'stale_chain' as Health, mid: null as number | null,
+        atm_iv: null, rr25: null, iv_term_slope: null, skew: null as number | null,
+        rr_vel: null as number | null, flow: null as number | null, imb5: null as number | null };
+    }
+    const st = this.state(prod);
+    const futFresh = st.futBid > 0 && st.futAsk > 0 && ts - st.futAt < STALE_MS;
+    const mid = futFresh ? (st.futBid + st.futAsk) / 2 : null;
     const health: Health = futFresh ? 'ok' : 'stale_chain';
 
     const { atm_iv, rr25, iv_term_slope } =
-      mid != null ? this.optionAnalytics(mid, ts) : { atm_iv: null, rr25: null, iv_term_slope: null };
+      mid != null ? this.optionAnalytics(st, prod, mid, ts) : { atm_iv: null, rr25: null, iv_term_slope: null };
 
     let skew: number | null = null;
     if (rr25 != null) {
       const raw = Math.max(-1, Math.min(1, -rr25 / SKEW_SCALE)); // puts rich → bearish (<0)
       const a = 0.15;
-      this.smoothSkew = this.skewInit ? this.smoothSkew * (1 - a) + raw * a : raw;
-      this.skewInit = true;
-      skew = this.smoothSkew;
+      st.smoothSkew = st.skewInit ? st.smoothSkew * (1 - a) + raw * a : raw;
+      st.skewInit = true;
+      skew = st.smoothSkew;
     }
 
     let rr_vel: number | null = null;
     if (rr25 != null) {
-      this.rrHist.push({ t: ts, rr: rr25 });
+      st.rrHist.push({ t: ts, rr: rr25 });
       const cut = ts - RR_HIST_MS;
-      while (this.rrHist.length && this.rrHist[0]!.t < cut) this.rrHist.shift();
-      if (this.rrHist.length >= 2) rr_vel = rr25 - this.rrHist[0]!.rr;
+      while (st.rrHist.length && st.rrHist[0]!.t < cut) st.rrHist.shift();
+      if (st.rrHist.length >= 2) rr_vel = rr25 - st.rrHist[0]!.rr;
     }
 
-    const flow = this.signedFlow(ts);
+    const flow = futFresh ? this.signedFlow(st, ts) : null;
     // Top-of-book imbalance from the futures bbo sizes (mbp-1 entitled data):
     // (bidSz − askSz)/(bidSz + askSz) ∈ [-1,1]. >0 bid-heavy.
-    const szTot = this.futBidSz + this.futAskSz;
-    const imb5 = futFresh && szTot > 0 ? (this.futBidSz - this.futAskSz) / szTot : null;
+    const szTot = st.futBidSz + st.futAskSz;
+    const imb5 = futFresh && szTot > 0 ? (st.futBidSz - st.futAskSz) / szTot : null;
 
+    return { health, mid, atm_iv, rr25, iv_term_slope, skew, rr_vel, flow, imb5 };
+  }
+
+  private emit(): void {
+    const ts = Date.now();
     for (const skill of STREAM_SKILLS) {
       const sym = skill.symbol;
-      const isCL = sym === 'CL'; // sidecar carries CL only today
+      const prod = SYM_TO_PROD[sym];
+      const f = this.computeFields(prod, ts);
       const funding = this.fundingByCoin.get(HL_UNIVERSE_NAME[sym] ?? '') ?? null;
       const snap: AlphaSnapshot = {
         sym,
         seq: ++this.seq,
         ts,
-        health: isCL ? health : 'stale_chain',
+        health: f.health,
         fields: {
-          rr25: fv(isCL ? rr25 : null, ts),
-          rr25_d4h: fv(isCL ? rr_vel : null, ts),
-          skew_signal: fv(isCL ? skew : null, ts),
-          atm_iv: fv(isCL ? atm_iv : null, ts),
+          rr25: fv(f.rr25, ts),
+          rr25_d4h: fv(f.rr_vel, ts),
+          skew_signal: fv(f.skew, ts),
+          atm_iv: fv(f.atm_iv, ts),
           gex_put_wall: fv(null, ts),
           gex_call_wall: fv(null, ts),
           spot_vs_walls: fv(null, ts),
-          iv_term_slope: fv(isCL ? iv_term_slope : null, ts),
-          cme_fwd_mid: fv(isCL ? mid : null, ts),
+          iv_term_slope: fv(f.iv_term_slope, ts),
+          cme_fwd_mid: fv(f.mid, ts),
           cme_hl_basis_bps: fv(0, ts),
-          signed_flow_10: fv(isCL ? flow : null, ts),
-          imb_5: fv(isCL ? imb5 : null, ts),
+          signed_flow_10: fv(f.flow, ts),
+          imb_5: fv(f.imb5, ts),
           funding: fv(funding, ts),
         },
       };
