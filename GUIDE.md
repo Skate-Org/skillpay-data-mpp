@@ -1,8 +1,13 @@
-# Subscribing to the Crude Alpha Stream (Tempo MPP)
+# Subscribing to the Commodity Alpha Stream (Tempo MPP)
 
-Live CME-options-derived crude alpha (WTI `CL`, Brent `BRENT`) over a WebSocket,
-paid per-minute over a **Tempo MPP payment channel**. No accounts, no API keys —
-you open one on-chain payment channel and stream pay-as-you-go.
+Live CME-options-derived commodity alpha — WTI crude `CL`, gold `GOLD`, silver
+`SILVER` (plus `BRENT`, catalogued) — over a WebSocket, paid per-minute over a
+**Tempo MPP payment channel**. Every symbol shares the identical field set and
+protocol; just swap `:symbol` in the routes below.
+
+Pay-as-you-go with one on-chain channel (below), **or** connect unmetered with an
+allowlisted `?apiKey=<key>` if the operator issued you one — same routes, no
+payment (see the operator's `STREAM_API_KEYS`).
 
 - **Price:** `$0.001 / minute`
 - **Payment rail:** Tempo MPP (cumulative EIP-712 vouchers; one channel, many
@@ -47,7 +52,7 @@ closes + settles on-chain (refunding the unused deposit).
 |-----|---------|---------|
 | `TEMPO_NETWORK` | `mainnet` | `mainnet` or `testnet` — the **flick toggle** |
 | `STREAM_HOST` | `34.104.223.186:7070` | stream host:port |
-| `SYMBOL` | `CL` | `CL` (WTI) or `BRENT` |
+| `SYMBOL` | `CL` | `CL` (WTI), `GOLD`, `SILVER`, or `BRENT` |
 | `PRIVATE_KEY` | (generated) | payer key; **required on mainnet**, pre-funded with pathUSD |
 | `MAX_DEPOSIT` | `0.1` | pathUSD locked in the channel (≈100 min @ $0.001/min) |
 

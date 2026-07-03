@@ -1,15 +1,16 @@
 # crude-alpha-stream
 
-A paid, real-time **WebSocket stream of derived crude-oil alpha** — CME
-options-skew + futures microstructure — monetized **per-minute over a Tempo MPP
-payment channel** (one on-chain deposit, off-chain vouchers, settle-on-close).
+A paid, real-time **WebSocket stream of derived commodity alpha** — CME
+options-skew + futures microstructure for **WTI crude, gold, and silver** —
+monetized **per-minute over a Tempo MPP payment channel** (one on-chain deposit,
+off-chain vouchers, settle-on-close).
 
 ```
 ┌────────────────────┐    NDJSON over TCP       ┌──────────────────────────┐
 │   sidecar          │  :5051 (internal only)   │   stream                 │
 │  Databento GLBX    │ ───────────────────────► │  • computes alpha frame  │
-│  CL futures + LO   │                          │  • Tempo MPP pay-gate     │
-│  options (live)    │                          │  • WS /ws/stream/:sym    │
+│  CL·GC·SI futures  │                          │  • Tempo MPP pay-gate     │
+│  + options (live)  │                          │  • WS /ws/stream/:sym    │
 └────────────────────┘                          │  • dashboard /            │
                                                  └───────────┬──────────────┘
                                                     :7070 (public ingress)
@@ -39,6 +40,24 @@ payment channel** (one on-chain deposit, off-chain vouchers, settle-on-close).
 `health` is `ok` when the chain is fresh, else `stale_chain`.
 `GET /skills` lists symbols, price, and payment info.
 
+### Symbols
+
+One `GLBX.MDP3` entitlement drives several CME products from a **single**
+Databento Live session — each is its own `/ws/stream/:symbol` and `/skills`
+entry, with the identical field set above:
+
+| Symbol | Product | CME futures / options | Strike grid |
+|---|---|---|---|
+| `CL` | WTI crude (NYMEX) | `CL` / `LO` | $0.50 |
+| `GOLD` | gold (COMEX) | `GC` / `OG` | $10 |
+| `SILVER` | silver (COMEX) | `SI` / `SO` | $0.50 |
+
+(`BRENT` is catalogued but not yet fed.) The sidecar subscribes the front few
+outrights per product and emits the **most actively-quoting** contract, so it
+tracks the live month through rolls — e.g. COMEX silver rolls Jul→Sep past the
+thin Aug serial without going dark. Add a product by appending a row to the
+sidecar's `PRODUCTS` table and a `STREAM_SKILLS` entry.
+
 ---
 
 ## Subscribe (quick start)
@@ -59,6 +78,11 @@ many vouchers — the mppx *multi-fetch* pattern), prints live alpha, and on
 **[GUIDE.md](./GUIDE.md)**.
 
 ### Protocol (any language)
+
+The route symbol is any catalog entry (`CL`, `GOLD`, `SILVER`). To connect
+**unmetered** with an operator-issued allowlist key, skip steps 1 & 3 and open
+`ws://<host>:7070/ws/stream/<SYMBOL>?apiKey=<key>` directly (or send an
+`X-API-Key` header) — see `STREAM_API_KEYS` below. Otherwise, pay per minute:
 
 1. **Pay a voucher** (opens the channel on first call) with an mppx session:
    `session.fetch('http://<host>:7070/mpp/session?symbol=CL')` →
@@ -158,7 +182,10 @@ Live reference deployment: GCE VM in Tokyo, `http://34.104.223.186:7070`.
 | Var | Default | Notes |
 |---|---|---|
 | `DATABENTO_API_KEY` | — | **required**; live GLBX.MDP3 key (sidecar) |
-| `STRIKES_WINDOW` | `40` | ATM strikes per side (±N at $0.50) |
+| `STRIKES_WINDOW` | `40` | ATM strikes per side, per product's strike grid |
+| `FUT_DEPTH` | `4` | front outright futures subscribed per product |
+| `OPT_EXP_DEPTH` | `3` | front option expiries constructed per product |
+| `PRODS` | (all) | comma-sep subset of products to stream, e.g. `CL,GOLD` |
 | `STREAM_PORT` | `7070` | host port to publish on |
 | `SIDECAR_EMIT_MS` | `1000` | snapshot cadence |
 | `MPP_TESTNET` | `false` | **the mainnet/testnet toggle** |
@@ -166,6 +193,8 @@ Live reference deployment: GCE VM in Tokyo, `http://34.104.223.186:7070`.
 | `MPP_SECRET_KEY` | — | HMAC secret for stream tokens. **secret** |
 | `MPP_MINUTES_PER_PAYMENT` | `1` | minutes granted per paid voucher |
 | `MPP_AMOUNT` | `0.001` | pathUSD per voucher |
+| `STREAM_API_KEYS` | (none) | comma/space-sep allowlist for unmetered `?apiKey=` access |
+| `STREAM_API_KEY_SESSION_MINUTES` | `1440` | session length granted to an apiKey connection |
 
 ---
 
@@ -177,7 +206,7 @@ crude-alpha-stream/
 ├─ .env.example              # copy → .env  (real .env is gitignored)
 ├─ README.md · GUIDE.md      # this + the subscriber walk-through
 ├─ subscribe.mjs             # reference MPP multi-fetch subscribe client
-├─ sidecar/                  # Databento → NDJSON TCP feed (Python)
+├─ sidecar/                  # Databento GLBX multi-product → NDJSON TCP feed (Python)
 └─ stream/                   # MPP-paid WebSocket stream (TypeScript)
    └─ src/                   # config · types · mpp · stream-token · ws-gateway · sidecar-source · server
 ```

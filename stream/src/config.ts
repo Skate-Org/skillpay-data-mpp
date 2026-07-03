@@ -18,6 +18,18 @@ export const STREAM_SKILLS: StreamSkillConfig[] = [
     pricePerMinuteUsd: 0.001,
     channels: ['oil.options', 'oil.structure', 'oil.micro', 'regime'],
   },
+  {
+    symbol: 'GOLD',
+    name: 'Gold Alpha (COMEX options × HL microstructure)',
+    pricePerMinuteUsd: 0.001,
+    channels: ['metals.options', 'metals.structure', 'metals.micro', 'regime'],
+  },
+  {
+    symbol: 'SILVER',
+    name: 'Silver Alpha (COMEX options × HL microstructure)',
+    pricePerMinuteUsd: 0.001,
+    channels: ['metals.options', 'metals.structure', 'metals.micro', 'regime'],
+  },
 ];
 
 export const STREAM_SKILLS_MAP = new Map<string, StreamSkillConfig>(
